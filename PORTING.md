@@ -3,6 +3,23 @@
 本文档是平台适配工作的**权威依据**：目标不变量、实施方案、验收标准、已踩过的坑。
 换机器/换平台开发时，以本文档 + `PROTOCOL.md` + 现有 Windows 实现为准，防止目标漂移。
 
+## 文档效力分级（先读这个）
+
+本文档两类内容效力不同：
+
+- **不可协商**：§0 目标、§1 统一性契约、§5 验收标准、`PROTOCOL.md` 全部。改这些需要与项目所有者重新确认。
+- **推荐路径**：§3/§4 的具体技术选型（crate、API、方案）。这些基于 **2026-07 的文档调研**，
+  **未经目标平台真机验证**。它们是默认起点，不是教条——实机不符时，实施者应当**主动寻找并验证替代方案**，
+  而不是硬磕本文档写下的路线。判断替代方案是否合格的唯一标准：满足 §1 契约 + 通过 §5 验收 + capability 如实。
+
+**实施纪律**：
+1. **风险探针先行**：动手全量实现前，先对 §3a/§4a 列出的高风险假设各写一个最小可运行验证（几十行的 spike），
+   确认真机行为再铺开。假设塌了 → 立即转入替代路线，沉没成本为零。
+2. **受阻即换道**：推荐路径卡住超过约一个工作日，停止死磕——这些领域（尤其 PipeWire 与 macOS 私有 API）
+   社区方案迭代很快，检索当下最新的做法（关键词见各节），用 spike 验证后采纳。
+3. **回写义务**：无论采纳还是否决了某条路线，把结论（含"为什么不行"）写回本文档并提交——
+   本文档是活文档，它的价值取决于是否反映真机事实。
+
 ## 0. 项目目标（不可漂移的原点）
 
 为 Electron 直播工具（danmacat-desktop）提供音频 sidecar，四项能力：
@@ -57,6 +74,16 @@ IPC：stdio NDJSON，协议传输无关。以上均为用户确认过的决策�
 
 **capabilities**：`process_loopback_exclude: false`，其余 true。
 
+### 3a. Linux 风险假设与替代梯队
+
+| 风险假设（先 spike 验证） | 主选 | 替代梯队 |
+|---|---|---|
+| `set_monitor_stream` 在 **PipeWire 的 pulse 兼容层**上行为正确（现代发行版默认 PipeWire，纸面结论只对原生 PulseAudio 有把握） | libpulse-binding | ① `pipewire` crate 原生 API（stream 直连目标 node，PipeWire 下可能反而更干净）；② 都不行则 `process_loopback: false`，只交付设备级捕捉 |
+| sink-input 的 `application.process.id` 属性普遍存在 | 按 pid 匹配 | 属性缺失的应用按 `application.name` 辅助展示（仅影响 `processes.listAudio` 的呈现，不扩协议） |
+| zbus 与 MPRIS 各播放器兼容性 | zbus 手写 proxy | `mpris` crate（dbus-rs 阻塞式，放专用线程与现有模式一致） |
+
+检索关键词：`pipewire rust capture application stream`、`pw-stream target-object`、`libpulse set_monitor_stream pipewire`。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。
@@ -73,6 +100,18 @@ IPC：stdio NDJSON，协议传输无关。以上均为用户确认过的决策�
 - **best-effort 纪律**：启动时探测可用性，失败则 `media_sessions/media_artwork: false`，不 panic 不重试轰炸；私有 API 每次 macOS 大版本都可能失效，失效即翻 capability，捕捉功能不受牵连
 
 **打包注意**：`NSAudioCaptureUsageDescription` 写进宿主 Electron 应用 Info.plist；TCC 授权弹窗归属宿主 .app。
+
+### 4a. macOS 风险假设与替代梯队（本平台纸面成分最高，全部先 spike）
+
+| 风险假设（先 spike 验证） | 主选 | 替代梯队 |
+|---|---|---|
+| `objc2-core-audio` 对 process tap 的绑定完整可用（这是三平台里最没把握的一条） | objc2-core-audio | ① `cidre` crate（AudioCap 作者生态，覆盖 CA tap）；② `coreaudio-sys` 原始 FFI 手写缺失部分；③ ScreenCaptureKit（13+，牺牲权限体验）。**不采纳**虚拟声卡方案（要求用户装第三方驱动，违背零依赖交付——除非项目所有者改变决策） |
+| mediaremote-adapter 在当前 macOS 版本仍有效（私有 API，每个大版本都可能被封） | mediaremote-adapter | ① 检索当下社区最新 now-playing 方案（该生态与 Apple 处于猫鼠状态，本文档写下的方案可能已过时）；② AppleScript/JXA 轮询主流播放器（Music/Spotify）作降级；③ 都不行 → `media_sessions: false`，捕捉功能不受牵连 |
+| 新子进程需重建 tap 的空隙可接受（<100ms） | 定时对比进程树重建 | 空隙不可接受时研究 tap 的动态更新 API；仍不行则文档化该限制 |
+| TCC 权限在"宿主 spawn 的子进程"场景正确归属宿主 .app | 权限挂宿主 | spike 确认弹窗归属与授权持久性；异常时研究 entitlement/签名要求并写入打包文档 |
+
+检索关键词：`AudioHardwareCreateProcessTap rust`、`cidre process tap`、`CATapDescription exclude`、
+`macOS now playing API <当前版本号>`、`mediaremote-adapter alternative`。
 
 ## 5. 验收标准（每个平台完成时必须全过）
 
