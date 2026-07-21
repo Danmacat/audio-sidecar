@@ -165,6 +165,14 @@ function bar(values) {
   return values.map((v) => BLOCKS[Math.min(8, Math.max(0, Math.floor(v * 8.999)))]).join("");
 }
 
+// One-glyph loudness indicator. rms is raw (typical music 0.05-0.3), so map
+// through dB like a VU meter: -60 dBFS.. 0 dBFS -> " ".."█".
+function loudnessGlyph(rms) {
+  if (!(rms > 0)) return BLOCKS[0];
+  const v = Math.max(0, Math.min(1, (20 * Math.log10(rms) + 60) / 60));
+  return BLOCKS[Math.min(8, Math.floor(v * 8.999))];
+}
+
 async function main() {
   switch (cmd) {
     case "hello": {
@@ -250,12 +258,17 @@ async function main() {
           if (!s.bands) continue;
           if (single) {
             s.bands.forEach((ch, i) =>
-              lines.push(`${i === 0 ? "L" : "R"} |${bar(ch)}| rms=${(s.rms[i] ?? 0).toFixed(3)}`)
+              lines.push(
+                `${i === 0 ? "L" : "R"} |${bar(ch)}| rms=${(s.rms[i] ?? 0).toFixed(3)} [${loudnessGlyph(s.rms[i] ?? 0)}]`
+              )
             );
           } else {
             // One mixed row per capture: element-wise max of both channels.
             const mixed = s.bands[0].map((v, i) => Math.max(v, s.bands[1]?.[i] ?? 0));
-            lines.push(`${id} ${s.label.padEnd(12)} |${bar(mixed)}| rms=${(s.rms[0] ?? 0).toFixed(3)}`);
+            const loudest = Math.max(...s.rms, 0);
+            lines.push(
+              `${id} ${s.label.padEnd(12)} |${bar(mixed)}| rms=${(s.rms[0] ?? 0).toFixed(3)} [${loudnessGlyph(loudest)}]`
+            );
           }
         }
         const gaps = [...caps.values()].reduce((n, s) => n + s.gaps, 0);
