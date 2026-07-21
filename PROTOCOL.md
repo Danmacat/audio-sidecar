@@ -72,7 +72,8 @@
 
 - `MediaSession` 增加 `artworkFile`（绝对路径）与 `artworkHash` 两个字段；未开启时恒为 `null`。
 - 封面就绪/变化时推 `media.sessionUpdated`，`changed=["artwork"]`——**哈希变了才推**，同一张专辑封面跨曲目不会重复通知、也只落盘一次（内容寻址天然去重）。
-- 渲染进程可直接以 `file://` 引用 `artworkFile`，无需经主进程转发图片数据；`media.getArtwork`（base64）仍可用。
+- 渲染进程可直接以 `file://` 引用 `artworkFile`，无需经主进程转发图片数据；`media.getArtwork`（base64 或 `writeTo` 按需落盘）仍可用。
+- 两种落盘方式的分工：`--artwork-dir` 是**推**（自动盯所有会话、事件通知）；`writeTo` 是**拉**（宿主指定会话按需写盘、响应即结果）。指向同一目录时缓存共享。
 - 抓取相对元数据事件是**异步**的：先收到 `mediaProperties` 更新（此时 `artworkFile` 可能还是旧值或 null），随后收到 `artwork` 更新。换曲期间过期的抓取结果会被自动丢弃。
 - sidecar 不清理目录（缓存语义）；宿主可按需清理，正在引用的文件不删即可。
 

@@ -53,6 +53,7 @@ enum MediaCmd {
     GetArtwork {
         session_id: String,
         max_bytes: u64,
+        write_to: Option<String>,
         reply: oneshot::Sender<Result<MediaGetArtworkResult, RpcError>>,
     },
     Quit,
@@ -121,13 +122,19 @@ impl MediaService for MediaHandle {
         })
     }
 
-    fn get_artwork(&self, session_id: String, max_bytes: u64) -> SvcFuture<MediaGetArtworkResult> {
+    fn get_artwork(
+        &self,
+        session_id: String,
+        max_bytes: u64,
+        write_to: Option<String>,
+    ) -> SvcFuture<MediaGetArtworkResult> {
         let (reply, rx) = oneshot::channel();
         let sent = self
             .tx
             .send(Msg::Cmd(MediaCmd::GetArtwork {
                 session_id,
                 max_bytes,
+                write_to,
                 reply,
             }))
             .is_ok();
@@ -373,6 +380,7 @@ impl Worker {
             MediaCmd::GetArtwork {
                 session_id,
                 max_bytes,
+                write_to,
                 reply,
             } => {
                 let found = self.tracked.values().find(|t| t.id == session_id);
@@ -386,7 +394,31 @@ impl Worker {
                     Some(t) => {
                         let session = t.session.clone();
                         std::thread::spawn(move || {
-                            let _ = reply.send(fetch_artwork(&session, max_bytes));
+                            let result = match write_to {
+                                Some(dir) => {
+                                    let dir = PathBuf::from(dir);
+                                    std::fs::create_dir_all(&dir)
+                                        .map_err(|e| {
+                                            RpcError::new(
+                                                ErrorCode::OsError,
+                                                format!(
+                                                    "cannot create writeTo dir {}: {e}",
+                                                    dir.display()
+                                                ),
+                                            )
+                                        })
+                                        .and_then(|()| cache_artwork(&session, &dir, max_bytes))
+                                        .map(|cached| MediaGetArtworkResult {
+                                            content_type: cached.content_type,
+                                            byte_length: cached.byte_length,
+                                            data_base64: None,
+                                            file: Some(cached.file),
+                                            hash: Some(cached.hash),
+                                        })
+                                }
+                                None => fetch_artwork(&session, max_bytes),
+                            };
+                            let _ = reply.send(result);
                         });
                     }
                 }
@@ -673,17 +705,19 @@ impl Worker {
         let session = t.session.clone();
         let id = t.id.clone();
         let tx = self.dirty_tx.clone();
-        std::thread::spawn(move || match cache_artwork(&session, &dir) {
-            Ok((file, hash)) => {
-                let _ = tx.send(Msg::ArtworkCached {
-                    key,
-                    generation,
-                    file,
-                    hash,
-                });
-            }
-            Err(e) => debug!(id, "artwork cache failed: {}", e.message),
-        });
+        std::thread::spawn(
+            move || match cache_artwork(&session, &dir, ARTWORK_CACHE_MAX) {
+                Ok(cached) => {
+                    let _ = tx.send(Msg::ArtworkCached {
+                        key,
+                        generation,
+                        file: cached.file,
+                        hash: cached.hash,
+                    });
+                }
+                Err(e) => debug!(id, "artwork cache failed: {}", e.message),
+            },
+        );
     }
 
     fn apply_artwork(&mut self, key: usize, generation: u64, file: String, hash: String) {
@@ -886,7 +920,9 @@ fn fetch_artwork(session: &Session, max_bytes: u64) -> Result<MediaGetArtworkRes
     Ok(MediaGetArtworkResult {
         content_type,
         byte_length: bytes.len() as u64,
-        data_base64: B64.encode(bytes),
+        data_base64: Some(B64.encode(bytes)),
+        file: None,
+        hash: None,
     })
 }
 
@@ -930,11 +966,19 @@ fn ext_for(content_type: &str, bytes: &[u8]) -> &'static str {
     }
 }
 
+struct CachedArtwork {
+    file: String,
+    hash: String,
+    content_type: String,
+    byte_length: u64,
+}
+
 /// Fetch, hash and atomically persist a session's artwork. Content-hash file
 /// names make the file itself the identity: an unchanged image is written
-/// once and shared across tracks/sessions.
-fn cache_artwork(session: &Session, dir: &Path) -> Result<(String, String), RpcError> {
-    let (content_type, bytes) = fetch_artwork_bytes(session, ARTWORK_CACHE_MAX)?;
+/// once and shared across tracks/sessions (and between `--artwork-dir` and
+/// `writeTo` when they point at the same directory).
+fn cache_artwork(session: &Session, dir: &Path, max_bytes: u64) -> Result<CachedArtwork, RpcError> {
+    let (content_type, bytes) = fetch_artwork_bytes(session, max_bytes)?;
     let hash = format!("{:016x}", fnv1a64(&bytes));
     let path = dir.join(format!("{hash}.{}", ext_for(&content_type, &bytes)));
     if !path.exists() {
@@ -950,7 +994,12 @@ fn cache_artwork(session: &Session, dir: &Path) -> Result<(String, String), RpcE
             }
         }
     }
-    Ok((path.to_string_lossy().into_owned(), hash))
+    Ok(CachedArtwork {
+        file: path.to_string_lossy().into_owned(),
+        hash,
+        content_type,
+        byte_length: bytes.len() as u64,
+    })
 }
 
 fn fetch_artwork_bytes(session: &Session, max_bytes: u64) -> Result<(String, Vec<u8>), RpcError> {

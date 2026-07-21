@@ -170,7 +170,10 @@ async fn route(
         "media.getArtwork" => {
             let p: MediaGetArtworkParams = parse_params(params)?;
             let svc = state.media.as_ref().ok_or_else(RpcError::unsupported)?;
-            to_value(svc.get_artwork(p.session_id, p.max_bytes).await?)
+            to_value(
+                svc.get_artwork(p.session_id, p.max_bytes, p.write_to)
+                    .await?,
+            )
         }
         "shutdown" => Ok(json!({})),
         other => Err(RpcError::new(

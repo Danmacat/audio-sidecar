@@ -148,6 +148,12 @@ pub struct MediaGetArtworkParams {
     #[serde(default = "d_max_artwork_bytes")]
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub max_bytes: u64,
+    /// When set: instead of returning base64, write the artwork into this
+    /// DIRECTORY as `<hash>.<ext>` (atomic, content-addressed — same scheme
+    /// and shared cache as `--artwork-dir`) and return `file` + `hash`.
+    #[serde(default)]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub write_to: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,7 +163,18 @@ pub struct MediaGetArtworkResult {
     pub content_type: String,
     #[cfg_attr(feature = "ts-export", ts(type = "number"))]
     pub byte_length: u64,
-    pub data_base64: String,
+    /// Present unless `writeTo` was used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub data_base64: Option<String>,
+    /// Absolute path of the written file (only with `writeTo`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub file: Option<String>,
+    /// Content hash — identical images yield identical hashes/paths.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub hash: Option<String>,
 }
 
 #[cfg(test)]

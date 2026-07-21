@@ -7,7 +7,7 @@
 //   node tools/dev-client.mjs apps
 //   node tools/dev-client.mjs watch
 //   node tools/dev-client.mjs meter [sources...] [--bands <n>] [--fps <n>] [--stall <ms>]
-//   node tools/dev-client.mjs media [--watch] [--artwork <file>] [--artwork-dir <dir>]
+//   node tools/dev-client.mjs media [--watch] [--artwork <file>] [--artwork-to <dir>] [--artwork-dir <dir>]
 //   node tools/dev-client.mjs pcm   [source] [--seconds <n>] [--out <file>] [--f32]
 //   node tools/dev-client.mjs raw '<json>'
 //
@@ -299,12 +299,21 @@ async function main() {
       const c = new Client(extra);
       const snap = await c.call("media.getSessions");
       console.log(JSON.stringify(snap, null, 2));
-      if (has("artwork")) {
+      if (has("artwork") || has("artwork-to")) {
         const target =
           snap.sessions.find((s) => s.isCurrent && s.artworkAvailable) ??
           snap.sessions.find((s) => s.artworkAvailable);
         if (!target) {
           console.error("no session with artwork available");
+        } else if (has("artwork-to")) {
+          // Pull-mode file cache: sidecar writes the file, we get the path.
+          const art = await c.call("media.getArtwork", {
+            sessionId: target.sessionId,
+            writeTo: flag1("artwork-to"),
+          });
+          console.error(
+            `sidecar cached ${art.byteLength} bytes (${art.contentType}) for "${target.title}" -> ${art.file} (hash ${art.hash})`
+          );
         } else {
           const art = await c.call("media.getArtwork", { sessionId: target.sessionId });
           fs.writeFileSync(flag1("artwork"), Buffer.from(art.dataBase64, "base64"));

@@ -31,7 +31,12 @@ pub trait DeviceService: Send + Sync + 'static {
 pub trait MediaService: Send + Sync + 'static {
     fn get_sessions(&self) -> SvcFuture<MediaGetSessionsResult>;
     fn get_current(&self) -> SvcFuture<MediaGetCurrentResult>;
-    fn get_artwork(&self, session_id: String, max_bytes: u64) -> SvcFuture<MediaGetArtworkResult>;
+    fn get_artwork(
+        &self,
+        session_id: String,
+        max_bytes: u64,
+        write_to: Option<String>,
+    ) -> SvcFuture<MediaGetArtworkResult>;
 }
 
 pub struct AppState {
