@@ -46,7 +46,7 @@
 | `capture.list` | 全部会话及统计：`framesEmitted/framesDropped/pcmChunksEmitted/ringOverflows/starvedTicks/restarts`。 |
 | `media.getSessions` | 系统媒体会话全量快照 + `currentSessionId`。 |
 | `media.getCurrent` | 当前会话或 `null`。 |
-| `media.getArtwork` | `{sessionId, maxBytes? = 2000000}` → `{contentType, byteLength, dataBase64}`。3s 超时；空流自动重试一次（部分应用切歌后封面晚到）。错误：`sessionNotFound` / `artworkUnavailable` / `artworkTooLarge`（`data.byteLength` 告知实际大小）。 |
+| `media.getArtwork` | `{sessionId, maxBytes? = 2000000, writeTo?}` → 默认 `{contentType, byteLength, dataBase64}`；传 `writeTo`（**目录**路径）则改为写文件并返回 `{contentType, byteLength, file, hash}`（无 base64）——命名/原子写/去重与 §4a 同一套机制，与 `--artwork-dir` 指向同目录时共享缓存（文件已存在则秒回）。3s 超时；空流自动重试一次（部分应用切歌后封面晚到）。错误：`sessionNotFound` / `artworkUnavailable` / `artworkTooLarge`（`data.byteLength` 告知实际大小）。 |
 | `shutdown` | 优雅退出。 |
 
 **capabilities**（Windows 全量为 true；`processLoopback*` 需 Win10 build 19041+）：`deviceCapture, deviceLoopback, followDefaultOutput, followDefaultInput, processLoopback, processLoopbackExclude, audioProcessList, deviceEvents, mediaSessions, mediaArtwork, spectrum, pcmStream`。
