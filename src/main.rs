@@ -343,25 +343,6 @@ fn main() {
     std::process::exit(code);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::resolve_artwork_dir;
-    use std::path::Path;
-
-    #[test]
-    fn artwork_dir_resolution() {
-        assert!(resolve_artwork_dir(None).is_none());
-        for sentinel in ["", super::TEMP_ARTWORK_SENTINEL] {
-            let managed = resolve_artwork_dir(Some(Path::new(sentinel))).unwrap();
-            assert!(managed.managed);
-            assert!(managed.path.ends_with("audio-sidecar-artwork"));
-        }
-        let explicit = resolve_artwork_dir(Some(Path::new("C:/x/cache"))).unwrap();
-        assert!(!explicit.managed);
-        assert_eq!(explicit.path, Path::new("C:/x/cache"));
-    }
-}
-
 async fn async_main(args: Args) -> i32 {
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -443,4 +424,23 @@ async fn async_main(args: Args) -> i32 {
     .await;
     let _ = tokio::time::timeout(Duration::from_millis(500), events.flush()).await;
     if reason == ExitReason::Fatal { 1 } else { 0 }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::resolve_artwork_dir;
+    use std::path::Path;
+
+    #[test]
+    fn artwork_dir_resolution() {
+        assert!(resolve_artwork_dir(None).is_none());
+        for sentinel in ["", super::TEMP_ARTWORK_SENTINEL] {
+            let managed = resolve_artwork_dir(Some(Path::new(sentinel))).unwrap();
+            assert!(managed.managed);
+            assert!(managed.path.ends_with("audio-sidecar-artwork"));
+        }
+        let explicit = resolve_artwork_dir(Some(Path::new("C:/x/cache"))).unwrap();
+        assert!(!explicit.managed);
+        assert_eq!(explicit.path, Path::new("C:/x/cache"));
+    }
 }
