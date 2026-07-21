@@ -28,9 +28,11 @@ node tools/dev-client.mjs hello                 # 握手与能力
 node tools/dev-client.mjs devices               # 设备列表
 node tools/dev-client.mjs apps                  # 有音频会话的进程（捕捉选择器数据源）
 node tools/dev-client.mjs meter --default       # 默认输出的实时终端频谱表（放音乐看效果）
-node tools/dev-client.mjs meter --pid 12345     # 只捕某进程；--exclude 反选
+node tools/dev-client.mjs meter --pid 12345     # 只捕某进程；--exclude-pid 反选
+node tools/dev-client.mjs meter --pid 111 --pid 222 --default   # 单进程同时开多路，按 captureId 分行显示
 node tools/dev-client.mjs watch                 # 打印全部事件（拔插设备/切歌试试）
 node tools/dev-client.mjs media --watch --artwork cover.jpg
+node tools/dev-client.mjs media --artwork-dir .\artcache        # 封面落盘模式（哈希命名，事件带路径）
 node tools/dev-client.mjs pcm --seconds 5 --out cap.raw   # Audacity 按 raw 导入试听
 node tools/dev-client.mjs raw '{"method":"devices.getDefault","params":{"kind":"render"}}'
 ```
@@ -49,6 +51,9 @@ node tools/dev-client.mjs raw '{"method":"devices.getDefault","params":{"kind":"
 - ✅ 背压：停读 6 秒丢 203 帧但进程存活、seq 有洞、恢复后响应正常
 - ✅ 错误码：methodNotFound / invalidParams / captureNotFound / sessionNotFound / deviceNotFound
 - ✅ 生命周期：stdin EOF 干净退出（exit 0）、stdout 无日志污染、启动即推媒体快照
+- ✅ 多路并发：单进程同时捕 2 个进程 + 默认输出，三路各自频率正确、零丢帧互不干扰
+- ✅ `--capture` 启动参数：免 RPC 自启动捕捉，含每路独立 spectrum 配置（30fps/64band 与 15fps/32band 并行）
+- ✅ `--artwork-dir` 封面落盘：真实播放器（SPlayer）封面以哈希名原子写出（魔数嗅探出 .jpg），`changed=["artwork"]` 事件带路径与哈希
 
 待手动验证（需要物理操作）：
 

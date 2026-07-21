@@ -16,4 +16,13 @@ appId: string, isCurrent: boolean, title: string, artist: string, album: string,
 /**
  * Always null on Windows; Linux MPRIS may expose an art URL the host fetches.
  */
-artworkUrl: string | null, timeline: MediaTimeline | null, };
+artworkUrl: string | null, 
+/**
+ * Set only when the sidecar runs with `--artwork-dir`: absolute path of
+ * the cached artwork file (content-hash named, written atomically).
+ */
+artworkFile: string | null, 
+/**
+ * Content hash of the cached artwork; changes iff the image changes.
+ */
+artworkHash: string | null, timeline: MediaTimeline | null, };

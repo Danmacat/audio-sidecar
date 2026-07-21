@@ -443,6 +443,11 @@ pub struct MediaSession {
     pub artwork_available: bool,
     /// Always null on Windows; Linux MPRIS may expose an art URL the host fetches.
     pub artwork_url: Option<String>,
+    /// Set only when the sidecar runs with `--artwork-dir`: absolute path of
+    /// the cached artwork file (content-hash named, written atomically).
+    pub artwork_file: Option<String>,
+    /// Content hash of the cached artwork; changes iff the image changes.
+    pub artwork_hash: Option<String>,
     pub timeline: Option<MediaTimeline>,
 }
 

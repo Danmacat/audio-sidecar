@@ -49,6 +49,18 @@ struct Args {
     /// Reject request lines longer than this many bytes.
     #[arg(long, default_value_t = 1_048_576)]
     max_line_bytes: usize,
+    /// Start a capture at boot (repeatable). Value is JSON: either a
+    /// CaptureSource (e.g. '{"type":"defaultOutput"}') or full
+    /// CaptureStartParams ('{"source":{...},"spectrum":{...}}'). Sugar over
+    /// `capture.start` — resulting captureIds arrive via `capture.state`
+    /// events and `capture.list`.
+    #[arg(long = "capture", value_name = "JSON")]
+    captures: Vec<String>,
+    /// Cache media artwork into this directory as `<hash>.<ext>` (atomic
+    /// writes); sessions then carry `artworkFile`/`artworkHash` and emit
+    /// `media.sessionUpdated` with changed=["artwork"].
+    #[arg(long)]
+    artwork_dir: Option<std::path::PathBuf>,
     /// Print the hello result to stdout and exit (smoke test).
     #[arg(long)]
     print_hello: bool,
@@ -109,7 +121,12 @@ struct Platform {
 }
 
 #[cfg(windows)]
-fn init_platform(events: EventTx, capabilities: Capabilities, limits: Limits) -> Platform {
+fn init_platform(
+    events: EventTx,
+    capabilities: Capabilities,
+    limits: Limits,
+    artwork_dir: Option<std::path::PathBuf>,
+) -> Platform {
     let (mgr_tx, mgr_rx) = tokio::sync::mpsc::unbounded_channel();
     let dev = capture::windows::devices::spawn(events.clone(), mgr_tx.clone());
     let devices: Arc<dyn DeviceService> = Arc::new(dev.handle.clone());
@@ -122,7 +139,7 @@ fn init_platform(events: EventTx, capabilities: Capabilities, limits: Limits) ->
         capabilities,
         limits,
     );
-    let media_worker = media::windows::spawn(events);
+    let media_worker = media::windows::spawn(events, artwork_dir);
     let media: Arc<dyn MediaService> = Arc::new(media_worker.handle.clone());
 
     let dev_handle = dev.handle.clone();
@@ -143,7 +160,12 @@ fn init_platform(events: EventTx, capabilities: Capabilities, limits: Limits) ->
 }
 
 #[cfg(not(windows))]
-fn init_platform(events: EventTx, capabilities: Capabilities, limits: Limits) -> Platform {
+fn init_platform(
+    events: EventTx,
+    capabilities: Capabilities,
+    limits: Limits,
+    _artwork_dir: Option<std::path::PathBuf>,
+) -> Platform {
     let manager = capture::manager::spawn(
         Arc::new(capture::StubBackend),
         None,
@@ -193,6 +215,21 @@ fn init_tracing(args: &Args) -> Option<tracing_appender::non_blocking::WorkerGua
             registry.init();
             None
         }
+    }
+}
+
+/// Accept either a bare `CaptureSource` or full `CaptureStartParams`.
+fn parse_capture_arg(raw: &str) -> Result<protocol::methods::CaptureStartParams, String> {
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
+    if value.get("source").is_some() {
+        serde_json::from_value(value).map_err(|e| e.to_string())
+    } else {
+        let source = serde_json::from_value(value).map_err(|e| e.to_string())?;
+        Ok(protocol::methods::CaptureStartParams {
+            source,
+            spectrum: None,
+            pcm: None,
+        })
     }
 }
 
@@ -246,7 +283,12 @@ async fn async_main(args: Args) -> i32 {
     let (events, _writer_join) = rpc::writer::spawn(256);
     let capabilities = platform_capabilities();
     let limits = Limits::default();
-    let platform = init_platform(events.clone(), capabilities, limits.clone());
+    let platform = init_platform(
+        events.clone(),
+        capabilities,
+        limits.clone(),
+        args.artwork_dir.clone(),
+    );
 
     let state = Arc::new(AppState {
         platform: PLATFORM,
@@ -260,6 +302,26 @@ async fn async_main(args: Args) -> i32 {
         cancel: CancellationToken::new(),
         shutdown_reason: Mutex::new(None),
     });
+
+    // `--capture` sugar: start the requested captures as if the host had sent
+    // `capture.start`. Failures are logged, not fatal — the host still gets
+    // the full protocol and can inspect/retry.
+    for (i, raw) in args.captures.iter().enumerate() {
+        match parse_capture_arg(raw) {
+            Ok(params) => {
+                let manager = state.manager.clone();
+                tokio::spawn(async move {
+                    match manager.start(params).await {
+                        Ok(r) => info!(capture_id = r.capture_id, "--capture #{i} started"),
+                        Err(e) => {
+                            tracing::error!(code = ?e.code, "--capture #{i} failed: {}", e.message)
+                        }
+                    }
+                });
+            }
+            Err(e) => tracing::error!("--capture #{i} is not valid JSON: {e}"),
+        }
+    }
 
     let reason = rpc::router::run(state.clone(), events.clone(), args.max_line_bytes).await;
 

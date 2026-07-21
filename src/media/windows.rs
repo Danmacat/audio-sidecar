@@ -7,6 +7,7 @@
 //! worker (the RPC side enforces a timeout).
 
 use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 use std::sync::mpsc as std_mpsc;
 use std::sync::mpsc::RecvTimeoutError;
 use std::time::{Duration, Instant};
@@ -67,6 +68,15 @@ enum Dirty {
 enum Msg {
     Cmd(MediaCmd),
     Dirty(Dirty),
+    /// A background artwork-cache thread finished writing a file.
+    ArtworkCached {
+        key: usize,
+        /// Snapshot of the session's artwork generation when the fetch began;
+        /// a mismatch means the track changed meanwhile and the file is stale.
+        generation: u64,
+        file: String,
+        hash: String,
+    },
 }
 
 #[derive(Clone)]
@@ -139,12 +149,12 @@ pub struct MediaWorker {
     pub join: std::thread::JoinHandle<()>,
 }
 
-pub fn spawn(events: EventTx) -> MediaWorker {
+pub fn spawn(events: EventTx, artwork_dir: Option<PathBuf>) -> MediaWorker {
     let (tx, rx) = std_mpsc::channel::<Msg>();
     let dirty_tx = tx.clone();
     let join = std::thread::Builder::new()
         .name("media-worker".into())
-        .spawn(move || thread_main(rx, dirty_tx, events))
+        .spawn(move || thread_main(rx, dirty_tx, events, artwork_dir))
         .expect("failed to spawn media worker thread");
     MediaWorker {
         handle: MediaHandle { tx },
@@ -162,6 +172,9 @@ struct Tracked {
     snap: MediaSession,
     tokens: [i64; 3],
     last_timeline_emit: Instant,
+    /// Bumped on every media-properties change; lets stale artwork-cache
+    /// results from a previous track be discarded.
+    artwork_gen: u64,
 }
 
 struct Worker {
@@ -175,6 +188,9 @@ struct Worker {
     id_counter: HashMap<String, u32>,
     /// Timeline updates deferred by the throttle: key -> flush deadline.
     pending_timeline: HashMap<usize, Instant>,
+    /// When set, artwork is written here as `<hash>.<ext>` and sessions carry
+    /// `artworkFile`/`artworkHash`.
+    artwork_dir: Option<PathBuf>,
 }
 
 fn session_key(session: &Session) -> usize {
@@ -202,10 +218,25 @@ where
     })
 }
 
-fn thread_main(rx: std_mpsc::Receiver<Msg>, dirty_tx: std_mpsc::Sender<Msg>, events: EventTx) {
+fn thread_main(
+    rx: std_mpsc::Receiver<Msg>,
+    dirty_tx: std_mpsc::Sender<Msg>,
+    events: EventTx,
+    artwork_dir: Option<PathBuf>,
+) {
     unsafe {
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
+    let artwork_dir = artwork_dir.and_then(|dir| match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            error!(
+                "cannot create artwork dir {}: {e}; artwork caching disabled",
+                dir.display()
+            );
+            None
+        }
+    });
     let manager = match SessionManager::RequestAsync().and_then(|op| op.join()) {
         Ok(m) => m,
         Err(e) => {
@@ -222,7 +253,7 @@ fn thread_main(rx: std_mpsc::Receiver<Msg>, dirty_tx: std_mpsc::Sender<Msg>, eve
                     Msg::Cmd(MediaCmd::GetArtwork { reply, .. }) => {
                         let _ = reply.send(Err(RpcError::new(ErrorCode::OsError, e.to_string())));
                     }
-                    Msg::Dirty(_) => {}
+                    Msg::Dirty(_) | Msg::ArtworkCached { .. } => {}
                 }
             }
             return;
@@ -253,6 +284,7 @@ fn thread_main(rx: std_mpsc::Receiver<Msg>, dirty_tx: std_mpsc::Sender<Msg>, eve
         current_key: None,
         id_counter: HashMap::new(),
         pending_timeline: HashMap::new(),
+        artwork_dir,
     };
     info!("media worker running");
     worker.full_resync(true);
@@ -294,6 +326,12 @@ fn thread_main(rx: std_mpsc::Receiver<Msg>, dirty_tx: std_mpsc::Sender<Msg>, eve
                 Msg::Dirty(Dirty::One(key, kind)) => {
                     per_session.entry(key).or_default().insert(kind);
                 }
+                Msg::ArtworkCached {
+                    key,
+                    generation,
+                    file,
+                    hash,
+                } => worker.apply_artwork(key, generation, file, hash),
             }
         }
         if quit {
@@ -451,6 +489,7 @@ impl Worker {
                         id,
                         tokens,
                         last_timeline_emit: Instant::now() - TIMELINE_THROTTLE,
+                        artwork_gen: 0,
                     },
                 );
             }
@@ -480,6 +519,25 @@ impl Worker {
         let keys: Vec<usize> = self.order.clone();
         for key in keys {
             self.refresh_snapshot(key);
+        }
+
+        // Kick artwork caching for sessions that have art but no cached file
+        // yet (new sessions, or a previously failed fetch).
+        if self.artwork_dir.is_some() {
+            let need: Vec<usize> = self
+                .order
+                .iter()
+                .copied()
+                .filter(|k| {
+                    self.tracked
+                        .get(k)
+                        .map(|t| t.snap.artwork_available && t.snap.artwork_file.is_none())
+                        .unwrap_or(false)
+                })
+                .collect();
+            for key in need {
+                self.trigger_artwork(key);
+            }
         }
 
         if emit {
@@ -525,8 +583,13 @@ impl Worker {
         };
         let is_current = Some(key) == self.current_key;
         match snapshot_session(&t.session, &t.id, is_current) {
-            Ok(snap) => {
+            Ok(mut snap) => {
                 let t = self.tracked.get_mut(&key).expect("tracked");
+                // Artwork cache fields are managed by the worker, not the
+                // snapshot; carry them over (a stale path is corrected by the
+                // follow-up `artwork` update once the new fetch lands).
+                snap.artwork_file = t.snap.artwork_file.clone();
+                snap.artwork_hash = t.snap.artwork_hash.clone();
                 let changed = t.snap != snap;
                 t.snap = snap;
                 changed
@@ -574,15 +637,72 @@ impl Worker {
         if kinds.contains(&MediaChangeKind::Timeline) {
             t.last_timeline_emit = Instant::now();
         }
+        // A media-properties change means a (possibly) new track: invalidate
+        // in-flight artwork fetches and start a fresh one.
+        let need_artwork = self.artwork_dir.is_some()
+            && kinds.contains(&MediaChangeKind::MediaProperties)
+            && t.snap.artwork_available;
+        if need_artwork {
+            t.artwork_gen += 1;
+        }
         let mut changed: Vec<MediaChangeKind> = kinds.into_iter().collect();
         changed.sort_by_key(|k| match k {
             MediaChangeKind::MediaProperties => 0,
             MediaChangeKind::PlaybackInfo => 1,
             MediaChangeKind::Timeline => 2,
+            MediaChangeKind::Artwork => 3,
         });
         let session = t.snap.clone();
         self.events
             .send_event(&Event::MediaSessionUpdated { session, changed });
+        if need_artwork {
+            self.trigger_artwork(key);
+        }
+    }
+
+    /// Fetch this session's artwork on a short-lived thread and cache it into
+    /// `artwork_dir`; the result comes back as `Msg::ArtworkCached`.
+    fn trigger_artwork(&self, key: usize) {
+        let Some(dir) = self.artwork_dir.clone() else {
+            return;
+        };
+        let Some(t) = self.tracked.get(&key) else {
+            return;
+        };
+        let generation = t.artwork_gen;
+        let session = t.session.clone();
+        let id = t.id.clone();
+        let tx = self.dirty_tx.clone();
+        std::thread::spawn(move || match cache_artwork(&session, &dir) {
+            Ok((file, hash)) => {
+                let _ = tx.send(Msg::ArtworkCached {
+                    key,
+                    generation,
+                    file,
+                    hash,
+                });
+            }
+            Err(e) => debug!(id, "artwork cache failed: {}", e.message),
+        });
+    }
+
+    fn apply_artwork(&mut self, key: usize, generation: u64, file: String, hash: String) {
+        let Some(t) = self.tracked.get_mut(&key) else {
+            return;
+        };
+        if t.artwork_gen != generation {
+            return; // the track changed while fetching; a newer fetch is coming
+        }
+        if t.snap.artwork_hash.as_deref() == Some(hash.as_str()) {
+            return; // same image (e.g. album art shared across tracks)
+        }
+        t.snap.artwork_file = Some(file);
+        t.snap.artwork_hash = Some(hash);
+        let session = t.snap.clone();
+        self.events.send_event(&Event::MediaSessionUpdated {
+            session,
+            changed: vec![MediaChangeKind::Artwork],
+        });
     }
 
     fn flush_pending_timeline(&mut self) {
@@ -622,6 +742,8 @@ fn placeholder_snapshot(id: &str, aumid: &str) -> MediaSession {
         repeat: None,
         artwork_available: false,
         artwork_url: None,
+        artwork_file: None,
+        artwork_hash: None,
         timeline: None,
     }
 }
@@ -760,6 +882,78 @@ fn snapshot_session(
 // ---------------------------------------------------------------------------
 
 fn fetch_artwork(session: &Session, max_bytes: u64) -> Result<MediaGetArtworkResult, RpcError> {
+    let (content_type, bytes) = fetch_artwork_bytes(session, max_bytes)?;
+    Ok(MediaGetArtworkResult {
+        content_type,
+        byte_length: bytes.len() as u64,
+        data_base64: B64.encode(bytes),
+    })
+}
+
+/// Cap for artwork cached to disk (`--artwork-dir`); RPC fetches use the
+/// caller-provided `maxBytes` instead.
+const ARTWORK_CACHE_MAX: u64 = 10_000_000;
+
+fn fnv1a64(data: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in data {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
+}
+
+fn ext_for(content_type: &str, bytes: &[u8]) -> &'static str {
+    // Magic bytes first — SMTC often reports a generic content type.
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        return "jpg";
+    }
+    if bytes.starts_with(&[0x89, b'P', b'N', b'G']) {
+        return "png";
+    }
+    if bytes.starts_with(b"BM") {
+        return "bmp";
+    }
+    if bytes.starts_with(b"GIF8") {
+        return "gif";
+    }
+    if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        return "webp";
+    }
+    match content_type {
+        "image/jpeg" | "image/jpg" => "jpg",
+        "image/png" => "png",
+        "image/bmp" => "bmp",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        _ => "img",
+    }
+}
+
+/// Fetch, hash and atomically persist a session's artwork. Content-hash file
+/// names make the file itself the identity: an unchanged image is written
+/// once and shared across tracks/sessions.
+fn cache_artwork(session: &Session, dir: &Path) -> Result<(String, String), RpcError> {
+    let (content_type, bytes) = fetch_artwork_bytes(session, ARTWORK_CACHE_MAX)?;
+    let hash = format!("{:016x}", fnv1a64(&bytes));
+    let path = dir.join(format!("{hash}.{}", ext_for(&content_type, &bytes)));
+    if !path.exists() {
+        let tmp = dir.join(format!(".tmp-{hash}-{}", std::process::id()));
+        let io_err = |e: std::io::Error| RpcError::new(ErrorCode::OsError, e.to_string());
+        std::fs::write(&tmp, &bytes).map_err(io_err)?;
+        if let Err(e) = std::fs::rename(&tmp, &path) {
+            let _ = std::fs::remove_file(&tmp);
+            // A concurrent writer beating us to the rename is fine: the
+            // content (and therefore the file) is identical.
+            if !path.exists() {
+                return Err(io_err(e));
+            }
+        }
+    }
+    Ok((path.to_string_lossy().into_owned(), hash))
+}
+
+fn fetch_artwork_bytes(session: &Session, max_bytes: u64) -> Result<(String, Vec<u8>), RpcError> {
     unsafe {
         let _ = RoInitialize(RO_INIT_MULTITHREADED);
     }
@@ -814,10 +1008,6 @@ fn fetch_artwork(session: &Session, max_bytes: u64) -> Result<MediaGetArtworkRes
         reader
             .ReadBytes(&mut buf)
             .map_err(|e| RpcError::new(ErrorCode::OsError, e.to_string()))?;
-        return Ok(MediaGetArtworkResult {
-            content_type,
-            byte_length: size,
-            data_base64: B64.encode(buf),
-        });
+        return Ok((content_type, buf));
     }
 }

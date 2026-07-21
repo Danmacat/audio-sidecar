@@ -23,6 +23,9 @@
 ## 2. 生命周期
 
 - 宿主 `spawn(audio-sidecar.exe)`，建议参数：`--log-level info`（或 `--log-file <path>`）。
+- 可选启动参数：
+  - `--capture <json>`（可重复）：启动即发起捕捉的语法糖，值为 `CaptureSource`（如 `{"type":"defaultOutput"}`）或完整 `CaptureStartParams`（含 spectrum/pcm 配置）。等价于宿主发 `capture.start`，captureId 通过 `capture.state` 事件与 `capture.list` 获知；单条失败只记日志不致命。
+  - `--artwork-dir <path>`：开启封面落盘（见 §4a）。
 - 启动即用：无须等待任何 ready 信号，直接发 `hello`。（Windows 上启动时会主动推一次 `media.sessionsChanged` 全量快照。）
 - **stdin EOF（宿主退出/管道断开）→ sidecar 优雅退出**；也可显式调 `shutdown`（响应刷出 → `sidecar.exiting` 事件 → 清理 → exit 0）。清理挂死时 3 秒看门狗强杀（exit 1）。
 - CLI：`--print-hello` 打印 hello 结果后退出（打包后冒烟检查用）。
@@ -60,8 +63,18 @@
 | `capture.pcm` | 见 §7。 |
 | `media.sessionsChanged` | 会话增删时的全量快照（启动时也发一次）。 |
 | `media.currentChanged` | 当前会话切换。 |
-| `media.sessionUpdated` | `{session, changed: ("mediaProperties"\|"playbackInfo"\|"timeline")[]}`。**纯 timeline 更新每会话合并至 ≤2 次/秒**；`mediaProperties` 变化且 `artworkAvailable=true` 时宿主应重新拉封面。 |
+| `media.sessionUpdated` | `{session, changed: ("mediaProperties"\|"playbackInfo"\|"timeline"\|"artwork")[]}`。**纯 timeline 更新每会话合并至 ≤2 次/秒**；未开封面落盘时，`mediaProperties` 变化且 `artworkAvailable=true` 应重新调 `media.getArtwork`；开了落盘则等 `changed=["artwork"]` 事件即可（见 §4a）。 |
 | `sidecar.exiting` | `{reason: "shutdown"\|"stdinClosed"\|"fatal"}`。 |
+
+## 4a. 封面落盘（`--artwork-dir`）
+
+以该参数启动后，sidecar 在切歌/会话出现时自动抓取封面并**原子写入**（临时文件 + rename）目录，文件名为**内容哈希**：`<fnv1a64hex>.<jpg|png|bmp|gif|webp|img>`（扩展名按魔数嗅探）。语义：
+
+- `MediaSession` 增加 `artworkFile`（绝对路径）与 `artworkHash` 两个字段；未开启时恒为 `null`。
+- 封面就绪/变化时推 `media.sessionUpdated`，`changed=["artwork"]`——**哈希变了才推**，同一张专辑封面跨曲目不会重复通知、也只落盘一次（内容寻址天然去重）。
+- 渲染进程可直接以 `file://` 引用 `artworkFile`，无需经主进程转发图片数据；`media.getArtwork`（base64）仍可用。
+- 抓取相对元数据事件是**异步**的：先收到 `mediaProperties` 更新（此时 `artworkFile` 可能还是旧值或 null），随后收到 `artwork` 更新。换曲期间过期的抓取结果会被自动丢弃。
+- sidecar 不清理目录（缓存语义）；宿主可按需清理，正在引用的文件不删即可。
 
 ## 5. 捕捉源（CaptureSource）
 
@@ -74,6 +87,8 @@
 ```
 
 > Windows 的进程 loopback 只有"包含进程树 / 排除进程树"两种模式，不存在"仅该进程不含子进程"。浏览器音频在 utility 子进程渲染——用根 pid 也能捕到（含树），或直接用 `processes.listAudio` 给出的实际发声 pid。
+
+**多路捕捉**：`capture.start` 可并发调用多次（上限 `limits.maxCaptures`，默认 8），每路独立线程、独立配置，`capture.spectrum`/`capture.pcm` 事件按 `captureId` 分流。同时捕多个进程/多个设备无需多个 sidecar 进程。
 
 ## 6. 频谱（capture.spectrum）
 

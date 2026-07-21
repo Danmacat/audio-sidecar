@@ -6,11 +6,19 @@
 //   node tools/dev-client.mjs devices
 //   node tools/dev-client.mjs apps
 //   node tools/dev-client.mjs watch
-//   node tools/dev-client.mjs meter [--default|--input|--device <id>|--pid <n> [--exclude]]
-//                                   [--bands <n>] [--fps <n>] [--stall <ms>]
-//   node tools/dev-client.mjs media [--watch] [--artwork <file>]
-//   node tools/dev-client.mjs pcm   [--default|...] [--seconds <n>] [--out <file>] [--f32]
+//   node tools/dev-client.mjs meter [sources...] [--bands <n>] [--fps <n>] [--stall <ms>]
+//   node tools/dev-client.mjs media [--watch] [--artwork <file>] [--artwork-dir <dir>]
+//   node tools/dev-client.mjs pcm   [source] [--seconds <n>] [--out <file>] [--f32]
 //   node tools/dev-client.mjs raw '<json>'
+//
+// Source flags (repeatable — `meter` runs ALL of them concurrently in ONE
+// sidecar process, demonstrating multi-capture):
+//   --default             follow default output      --input   default input
+//   --device <id>         a specific endpoint
+//   --pid <n>             one process (+children)    --exclude-pid <n>  everything but it
+//   (legacy: --pid <n> --exclude == --exclude-pid <n>)
+//
+// Example: node tools/dev-client.mjs meter --pid 1234 --pid 5678 --default
 //
 // Env: SIDECAR_BIN (path to exe), SIDECAR_LOG (log level, default warn).
 
@@ -27,6 +35,7 @@ const BIN =
 
 const argv = process.argv.slice(2);
 const cmd = argv[0];
+/** flags[key] is an array of values ("true" markers for bare flags). */
 const flags = {};
 for (let i = 1; i < argv.length; i++) {
   const a = argv[i];
@@ -37,20 +46,22 @@ for (let i = 1; i < argv.length; i++) {
   const key = a.slice(2);
   const next = argv[i + 1];
   if (next !== undefined && !next.startsWith("--")) {
-    flags[key] = next;
+    (flags[key] ??= []).push(next);
     i++;
   } else {
-    flags[key] = true;
+    (flags[key] ??= []).push(true);
   }
 }
+const flag1 = (k) => flags[k]?.[0];
+const has = (k) => flags[k] !== undefined;
 
 class Client {
-  constructor() {
+  constructor(extraArgs = []) {
     if (!fs.existsSync(BIN)) {
       console.error(`sidecar binary not found at ${BIN} — run "cargo build" first (or set SIDECAR_BIN)`);
       process.exit(1);
     }
-    this.child = spawn(BIN, ["--log-level", process.env.SIDECAR_LOG ?? "warn"], {
+    this.child = spawn(BIN, ["--log-level", process.env.SIDECAR_LOG ?? "warn", ...extraArgs], {
       stdio: ["pipe", "pipe", "inherit"],
     });
     this.child.on("exit", (code) => {
@@ -112,12 +123,36 @@ class Client {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function sourceFromFlags() {
-  if (flags.device) return { type: "device", deviceId: flags.device };
-  if (flags.pid && flags.exclude) return { type: "systemExcludingProcess", pid: Number(flags.pid) };
-  if (flags.pid) return { type: "process", pid: Number(flags.pid) };
-  if (flags.input) return { type: "defaultInput" };
-  return { type: "defaultOutput" };
+function sourcesFromFlags() {
+  const out = [];
+  for (const id of flags.device ?? []) out.push({ type: "device", deviceId: id });
+  const excludeAll = has("exclude"); // legacy: --pid N --exclude
+  for (const p of flags.pid ?? [])
+    out.push(
+      excludeAll
+        ? { type: "systemExcludingProcess", pid: Number(p) }
+        : { type: "process", pid: Number(p) }
+    );
+  for (const p of flags["exclude-pid"] ?? []) out.push({ type: "systemExcludingProcess", pid: Number(p) });
+  if (has("default")) out.push({ type: "defaultOutput" });
+  if (has("input")) out.push({ type: "defaultInput" });
+  if (!out.length) out.push({ type: "defaultOutput" });
+  return out;
+}
+
+function sourceLabel(src) {
+  switch (src.type) {
+    case "device":
+      return `device:${src.deviceId.slice(-9, -1)}`;
+    case "process":
+      return `pid:${src.pid}`;
+    case "systemExcludingProcess":
+      return `!pid:${src.pid}`;
+    case "defaultInput":
+      return "input";
+    default:
+      return "default";
+  }
 }
 
 function onExitSignals(fn) {
@@ -181,36 +216,67 @@ async function main() {
 
     case "meter": {
       const c = new Client();
-      const source = sourceFromFlags();
+      const sources = sourcesFromFlags();
       const spectrum = {
-        bands: Number(flags.bands ?? 64),
-        fps: Number(flags.fps ?? 30),
+        bands: Number(flag1("bands") ?? 64),
+        fps: Number(flag1("fps") ?? 30),
       };
       c.on((event, data) => {
         if (event === "capture.state") console.error(`[state] ${JSON.stringify(data)}`);
       });
-      const started = await c.call("capture.start", { source, spectrum });
-      console.error(
-        `capturing ${JSON.stringify(source)} -> ${started.format.sampleRate}Hz/${started.format.channels}ch, ` +
-          `${started.spectrum.bands} bands @ ${started.spectrum.fps}fps (captureId ${started.captureId})`
-      );
-      let lastSeq = -1;
-      let gaps = 0;
-      let painted = false;
+
+      // All sources run concurrently in this ONE sidecar process; frames are
+      // demultiplexed by captureId.
+      const caps = new Map(); // captureId -> render state
+      for (const source of sources) {
+        const started = await c.call("capture.start", { source, spectrum });
+        caps.set(started.captureId, {
+          label: sourceLabel(source),
+          bands: null,
+          rms: [],
+          seq: -1,
+          gaps: 0,
+        });
+        console.error(
+          `${started.captureId} <- ${sourceLabel(source)} @ ${started.format.sampleRate}Hz/${started.format.channels}ch`
+        );
+      }
+
+      const single = caps.size === 1;
+      let painted = 0;
+      const repaint = () => {
+        const lines = [];
+        for (const [id, s] of caps) {
+          if (!s.bands) continue;
+          if (single) {
+            s.bands.forEach((ch, i) =>
+              lines.push(`${i === 0 ? "L" : "R"} |${bar(ch)}| rms=${(s.rms[i] ?? 0).toFixed(3)}`)
+            );
+          } else {
+            // One mixed row per capture: element-wise max of both channels.
+            const mixed = s.bands[0].map((v, i) => Math.max(v, s.bands[1]?.[i] ?? 0));
+            lines.push(`${id} ${s.label.padEnd(12)} |${bar(mixed)}| rms=${(s.rms[0] ?? 0).toFixed(3)}`);
+          }
+        }
+        const gaps = [...caps.values()].reduce((n, s) => n + s.gaps, 0);
+        lines.push(`captures=${caps.size} droppedGaps=${gaps}   Ctrl+C to quit`);
+        const text = lines.map((l) => l + "\x1b[K").join("\n");
+        process.stdout.write((painted ? `\x1b[${painted}F` : "") + text + "\n");
+        painted = lines.length;
+      };
       c.on((event, data) => {
         if (event !== "capture.spectrum") return;
-        if (lastSeq >= 0 && data.seq !== lastSeq + 1) gaps += data.seq - lastSeq - 1;
-        lastSeq = data.seq;
-        const lines = data.bands.map(
-          (ch, i) => `${i === 0 ? "L" : "R"} |${bar(ch)}| rms=${(data.rms[i] ?? 0).toFixed(3)}`
-        );
-        lines.push(`seq=${data.seq} droppedGaps=${gaps}   Ctrl+C to quit`);
-        const text = lines.join("\n");
-        process.stdout.write((painted ? `\x1b[${lines.length}F` : "") + text.replace(/$/gm, "\x1b[K") + "\n");
-        painted = true;
+        const s = caps.get(data.captureId);
+        if (!s) return;
+        if (s.seq >= 0 && data.seq !== s.seq + 1) s.gaps += data.seq - s.seq - 1;
+        s.seq = data.seq;
+        s.bands = data.bands;
+        s.rms = data.rms;
+        repaint();
       });
-      if (flags.stall) {
-        const ms = Number(flags.stall);
+
+      if (has("stall")) {
+        const ms = Number(flag1("stall"));
         setTimeout(() => {
           console.error(`\n[stall] pausing reads for ${ms} ms to test backpressure`);
           c.child.stdout.pause();
@@ -229,20 +295,23 @@ async function main() {
     }
 
     case "media": {
-      const c = new Client();
+      const extra = has("artwork-dir") ? ["--artwork-dir", flag1("artwork-dir")] : [];
+      const c = new Client(extra);
       const snap = await c.call("media.getSessions");
       console.log(JSON.stringify(snap, null, 2));
-      if (flags.artwork) {
-        const target = snap.sessions.find((s) => s.isCurrent && s.artworkAvailable) ?? snap.sessions.find((s) => s.artworkAvailable);
+      if (has("artwork")) {
+        const target =
+          snap.sessions.find((s) => s.isCurrent && s.artworkAvailable) ??
+          snap.sessions.find((s) => s.artworkAvailable);
         if (!target) {
           console.error("no session with artwork available");
         } else {
           const art = await c.call("media.getArtwork", { sessionId: target.sessionId });
-          fs.writeFileSync(flags.artwork, Buffer.from(art.dataBase64, "base64"));
-          console.error(`wrote ${art.byteLength} bytes (${art.contentType}) for "${target.title}" -> ${flags.artwork}`);
+          fs.writeFileSync(flag1("artwork"), Buffer.from(art.dataBase64, "base64"));
+          console.error(`wrote ${art.byteLength} bytes (${art.contentType}) for "${target.title}" -> ${flag1("artwork")}`);
         }
       }
-      if (flags.watch) {
+      if (has("watch")) {
         console.error("watching media events; Ctrl+C to quit");
         c.on((event, data) => {
           if (event.startsWith("media.")) console.log(JSON.stringify({ event, data }));
@@ -251,6 +320,14 @@ async function main() {
           await c.close();
           process.exit(0);
         });
+      } else if (has("artwork-dir")) {
+        // Give background artwork caching a moment, then show the results.
+        await sleep(2000);
+        const after = await c.call("media.getSessions");
+        for (const s of after.sessions) {
+          if (s.artworkFile) console.error(`artwork cached: ${s.sessionId} -> ${s.artworkFile}`);
+        }
+        await c.close();
       } else {
         await c.close();
       }
@@ -259,16 +336,15 @@ async function main() {
 
     case "pcm": {
       const c = new Client();
-      const source = sourceFromFlags();
-      const seconds = Number(flags.seconds ?? 5);
-      const format = flags.f32 ? "f32le" : "s16le";
-      const out = flags.out ?? "capture.raw";
+      const source = sourcesFromFlags()[0];
+      const seconds = Number(flag1("seconds") ?? 5);
+      const format = has("f32") ? "f32le" : "s16le";
+      const out = flag1("out") ?? "capture.raw";
       const chunks = [];
-      let info = null;
       c.on((event, data) => {
         if (event === "capture.pcm") chunks.push(Buffer.from(data.dataBase64, "base64"));
       });
-      info = await c.call("capture.start", {
+      const info = await c.call("capture.start", {
         source,
         spectrum: { enabled: false },
         pcm: { enabled: true, format },

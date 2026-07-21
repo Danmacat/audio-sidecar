@@ -22,6 +22,8 @@ pub enum MediaChangeKind {
     MediaProperties,
     PlaybackInfo,
     Timeline,
+    /// The cached artwork file changed (only with `--artwork-dir`).
+    Artwork,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
