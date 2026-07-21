@@ -1,0 +1,52 @@
+[package]
+name = "audio-sidecar"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+description = "Audio capture + spectrum + media session sidecar for danmacat-desktop"
+license = "MIT"
+
+[features]
+default = []
+ts-export = ["dep:ts-rs"]
+
+[dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
+tokio-util = "0.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2"
+clap = { version = "4", features = ["derive"] }
+realfft = "3"
+rtrb = "0.3"
+base64 = "0.22"
+thiserror = "2"
+anyhow = "1"
+ts-rs = { version = "10", optional = true, features = ["serde-compat", "serde-json-impl"] }
+
+[target.'cfg(windows)'.dependencies]
+wasapi = "0.23.0"
+windows-core = "0.62"
+windows = { version = "0.62", features = [
+    "Media_Control",
+    "Foundation",
+    "Foundation_Collections",
+    "Storage_Streams",
+    "Win32_Foundation",
+    "Win32_System_WinRT",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_Media_Audio",
+    "Win32_UI_Shell_PropertiesSystem",
+] }
+windows-version = "0.1"
+
+[dev-dependencies]
+approx = "0.5"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
