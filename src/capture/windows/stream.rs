@@ -117,12 +117,16 @@ fn run_io(
         }
     };
 
-    // Endpoint activation is occasionally flaky right after another client
-    // released the device (transient 0x80070002); retry briefly before
-    // reporting failure.
+    // Endpoint activation fails transiently with 0x80070002 in two known
+    // cases: right after another client released the device, and — much
+    // slower — when a wireless headset endpoint is waking from power-save
+    // (the first attempt is itself the wake trigger; the link takes 1-2 s to
+    // come up). The growing ladder below (~2.7 s of sleeps) covers both while
+    // staying inside the manager's 5 s ready timeout.
+    const INIT_RETRY_DELAYS_MS: [u64; 5] = [150, 250, 400, 700, 1200];
     let mut ctx = None;
     let mut last_err = None;
-    for attempt in 0..3 {
+    for attempt in 0..=INIT_RETRY_DELAYS_MS.len() {
         if stop.load(Ordering::Relaxed) {
             send_ready(Err(SessionError::Activation("stopped during init".into())));
             return;
@@ -139,7 +143,9 @@ fn run_io(
             Err(e) => {
                 debug!(capture_id = spec.capture_id, attempt, error = %e, "init attempt failed");
                 last_err = Some(e);
-                std::thread::sleep(Duration::from_millis(150));
+                if let Some(delay) = INIT_RETRY_DELAYS_MS.get(attempt) {
+                    std::thread::sleep(Duration::from_millis(*delay));
+                }
             }
         }
     }
