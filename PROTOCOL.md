@@ -25,7 +25,7 @@
 - 宿主 `spawn(audio-sidecar.exe)`，建议参数：`--log-level info`（或 `--log-file <path>`）。
 - 可选启动参数：
   - `--capture <json>`（可重复）：启动即发起捕捉的语法糖，值为 `CaptureSource`（如 `{"type":"defaultOutput"}`）或完整 `CaptureStartParams`（含 spectrum/pcm 配置）。等价于宿主发 `capture.start`，captureId 通过 `capture.state` 事件与 `capture.list` 获知；单条失败只记日志不致命。
-  - `--artwork-dir <path>`：开启封面落盘（见 §4a）。
+  - `--artwork-dir [<path>]`：开启封面落盘（见 §4a）。带路径 = 宿主指定目录（sidecar 绝不清理）；**不带值** = 使用 `<系统临时目录>/audio-sidecar-artwork`（sidecar 托管：启动时清理 30 天未触碰的缓存与残留临时文件）；不传该 flag = 不落盘。实际生效目录通过 `hello.artworkDir` 回传（未开启为 `null`）。
 - 启动即用：无须等待任何 ready 信号，直接发 `hello`。（Windows 上启动时会主动推一次 `media.sessionsChanged` 全量快照。）
 - **stdin EOF（宿主退出/管道断开）→ sidecar 优雅退出**；也可显式调 `shutdown`（响应刷出 → `sidecar.exiting` 事件 → 清理 → exit 0）。清理挂死时 3 秒看门狗强杀（exit 1）。
 - CLI：`--print-hello` 打印 hello 结果后退出（打包后冒烟检查用）。
@@ -75,7 +75,7 @@
 - 渲染进程可直接以 `file://` 引用 `artworkFile`，无需经主进程转发图片数据；`media.getArtwork`（base64 或 `writeTo` 按需落盘）仍可用。
 - 两种落盘方式的分工：`--artwork-dir` 是**推**（自动盯所有会话、事件通知）；`writeTo` 是**拉**（宿主指定会话按需写盘、响应即结果）。指向同一目录时缓存共享。
 - 抓取相对元数据事件是**异步**的：先收到 `mediaProperties` 更新（此时 `artworkFile` 可能还是旧值或 null），随后收到 `artwork` 更新。换曲期间过期的抓取结果会被自动丢弃。
-- sidecar 不清理目录（缓存语义）；宿主可按需清理，正在引用的文件不删即可。
+- 清理策略：宿主指定的目录 sidecar 绝不清理（宿主全权管理）；裸 `--artwork-dir` 的托管临时目录会在启动时删除 30 天未触碰的文件（内容哈希命名保证删错无害——还需要的图会自动重新缓存）。跨重启持久引用 `artworkFile` 的宿主应使用自指定目录。
 
 ## 5. 捕捉源（CaptureSource）
 

@@ -295,7 +295,13 @@ async function main() {
     }
 
     case "media": {
-      const extra = has("artwork-dir") ? ["--artwork-dir", flag1("artwork-dir")] : [];
+      // Bare `--artwork-dir` (value true) forwards as bare = temp-dir mode.
+      const dirVal = flag1("artwork-dir");
+      const extra = has("artwork-dir")
+        ? dirVal === true
+          ? ["--artwork-dir"]
+          : ["--artwork-dir", dirVal]
+        : [];
       const c = new Client(extra);
       const snap = await c.call("media.getSessions");
       console.log(JSON.stringify(snap, null, 2));

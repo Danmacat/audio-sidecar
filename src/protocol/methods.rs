@@ -36,6 +36,10 @@ pub struct HelloResult {
     pub started_at_ms: u64,
     pub capabilities: Capabilities,
     pub limits: Limits,
+    /// Effective artwork cache directory (`--artwork-dir`), or null when
+    /// caching is disabled. Bare `--artwork-dir` resolves to a sidecar-managed
+    /// temp location reported here.
+    pub artwork_dir: Option<String>,
 }
 
 // devices -------------------------------------------------------------------

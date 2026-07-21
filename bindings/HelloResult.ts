@@ -2,4 +2,10 @@
 import type { Capabilities } from "./Capabilities";
 import type { Limits } from "./Limits";
 
-export type HelloResult = { name: string, version: string, protocolVersion: number, platform: string, osVersion: string, pid: number, startedAtMs: number, capabilities: Capabilities, limits: Limits, };
+export type HelloResult = { name: string, version: string, protocolVersion: number, platform: string, osVersion: string, pid: number, startedAtMs: number, capabilities: Capabilities, limits: Limits, 
+/**
+ * Effective artwork cache directory (`--artwork-dir`), or null when
+ * caching is disabled. Bare `--artwork-dir` resolves to a sidecar-managed
+ * temp location reported here.
+ */
+artworkDir: string | null, };

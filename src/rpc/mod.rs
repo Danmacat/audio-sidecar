@@ -48,6 +48,7 @@ pub struct AppState {
     pub devices: Option<Arc<dyn DeviceService>>,
     pub media: Option<Arc<dyn MediaService>>,
     pub manager: ManagerHandle,
+    pub artwork_dir: Option<String>,
     pub cancel: CancellationToken,
     pub shutdown_reason: Mutex<Option<ExitReason>>,
 }
@@ -64,6 +65,7 @@ impl AppState {
             started_at_ms: self.started_at_ms,
             capabilities: self.capabilities,
             limits: self.limits.clone(),
+            artwork_dir: self.artwork_dir.clone(),
         }
     }
 

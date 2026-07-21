@@ -58,8 +58,11 @@ struct Args {
     captures: Vec<String>,
     /// Cache media artwork into this directory as `<hash>.<ext>` (atomic
     /// writes); sessions then carry `artworkFile`/`artworkHash` and emit
-    /// `media.sessionUpdated` with changed=["artwork"].
-    #[arg(long)]
+    /// `media.sessionUpdated` with changed=["artwork"]. Pass the flag WITHOUT
+    /// a value to use `<system temp>/audio-sidecar-artwork` (pruned of
+    /// 30-day-old files at startup). Omit the flag entirely to disable
+    /// caching. The effective directory is reported in `hello.artworkDir`.
+    #[arg(long, num_args = 0..=1, default_missing_value = TEMP_ARTWORK_SENTINEL, value_name = "DIR")]
     artwork_dir: Option<std::path::PathBuf>,
     /// Print the hello result to stdout and exit (smoke test).
     #[arg(long)]
@@ -218,6 +221,71 @@ fn init_tracing(args: &Args) -> Option<tracing_appender::non_blocking::WorkerGua
     }
 }
 
+/// Stand-in value clap assigns when `--artwork-dir` is passed without a path.
+const TEMP_ARTWORK_SENTINEL: &str = "::temp::";
+
+struct ResolvedArtworkDir {
+    path: std::path::PathBuf,
+    /// True for the sidecar-managed temp location: prune old files at boot.
+    /// Host-specified directories are never touched.
+    managed: bool,
+}
+
+/// `--artwork-dir <path>` -> that path; bare `--artwork-dir` -> system temp
+/// (managed); flag absent -> caching off.
+fn resolve_artwork_dir(arg: Option<&std::path::Path>) -> Option<ResolvedArtworkDir> {
+    match arg {
+        None => None,
+        Some(p) if p.as_os_str().is_empty() || p.as_os_str() == TEMP_ARTWORK_SENTINEL => {
+            Some(ResolvedArtworkDir {
+                path: std::env::temp_dir().join("audio-sidecar-artwork"),
+                managed: true,
+            })
+        }
+        Some(p) => Some(ResolvedArtworkDir {
+            path: p.to_path_buf(),
+            managed: false,
+        }),
+    }
+}
+
+/// Bound the managed temp cache: drop artwork untouched for 30 days and
+/// half-written `.tmp-*` leftovers older than an hour. Content-hash naming
+/// makes deletion safe — anything still needed is simply re-cached.
+fn prune_artwork_cache(dir: &std::path::Path) {
+    const MAX_AGE: Duration = Duration::from_secs(30 * 24 * 3600);
+    const TMP_MAX_AGE: Duration = Duration::from_secs(3600);
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    let mut pruned = 0u32;
+    for entry in entries.flatten() {
+        let Ok(meta) = entry.metadata() else { continue };
+        if !meta.is_file() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        let name = entry.file_name();
+        let limit = if name.to_string_lossy().starts_with(".tmp-") {
+            TMP_MAX_AGE
+        } else {
+            MAX_AGE
+        };
+        if age > limit && std::fs::remove_file(entry.path()).is_ok() {
+            pruned += 1;
+        }
+    }
+    if pruned > 0 {
+        info!(pruned, dir = %dir.display(), "pruned expired artwork cache files");
+    }
+}
+
 /// Accept either a bare `CaptureSource` or full `CaptureStartParams`.
 fn parse_capture_arg(raw: &str) -> Result<protocol::methods::CaptureStartParams, String> {
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|e| e.to_string())?;
@@ -233,7 +301,7 @@ fn parse_capture_arg(raw: &str) -> Result<protocol::methods::CaptureStartParams,
     }
 }
 
-fn print_hello() {
+fn print_hello(args: &Args) {
     let hello = protocol::methods::HelloResult {
         name: env!("CARGO_PKG_NAME").to_string(),
         version: env!("CARGO_PKG_VERSION").to_string(),
@@ -244,6 +312,8 @@ fn print_hello() {
         started_at_ms: util::now_ms(),
         capabilities: platform_capabilities(),
         limits: Limits::default(),
+        artwork_dir: resolve_artwork_dir(args.artwork_dir.as_deref())
+            .map(|a| a.path.to_string_lossy().into_owned()),
     };
     let json = serde_json::to_string(&hello).expect("hello serializes");
     let mut stdout = std::io::stdout();
@@ -254,7 +324,7 @@ fn main() {
     let args = Args::parse();
     let _log_guard = init_tracing(&args);
     if args.print_hello {
-        print_hello();
+        print_hello(&args);
         return;
     }
     if args.transport != "stdio" {
@@ -273,6 +343,25 @@ fn main() {
     std::process::exit(code);
 }
 
+#[cfg(test)]
+mod tests {
+    use super::resolve_artwork_dir;
+    use std::path::Path;
+
+    #[test]
+    fn artwork_dir_resolution() {
+        assert!(resolve_artwork_dir(None).is_none());
+        for sentinel in ["", super::TEMP_ARTWORK_SENTINEL] {
+            let managed = resolve_artwork_dir(Some(Path::new(sentinel))).unwrap();
+            assert!(managed.managed);
+            assert!(managed.path.ends_with("audio-sidecar-artwork"));
+        }
+        let explicit = resolve_artwork_dir(Some(Path::new("C:/x/cache"))).unwrap();
+        assert!(!explicit.managed);
+        assert_eq!(explicit.path, Path::new("C:/x/cache"));
+    }
+}
+
 async fn async_main(args: Args) -> i32 {
     info!(
         version = env!("CARGO_PKG_VERSION"),
@@ -283,11 +372,22 @@ async fn async_main(args: Args) -> i32 {
     let (events, _writer_join) = rpc::writer::spawn(256);
     let capabilities = platform_capabilities();
     let limits = Limits::default();
+    let artwork = resolve_artwork_dir(args.artwork_dir.as_deref());
+    if let Some(a) = &artwork {
+        if a.managed {
+            let dir = a.path.clone();
+            // Off the startup path; a large cache would otherwise delay boot.
+            std::thread::spawn(move || prune_artwork_cache(&dir));
+        }
+    }
+    let artwork_dir_str = artwork
+        .as_ref()
+        .map(|a| a.path.to_string_lossy().into_owned());
     let platform = init_platform(
         events.clone(),
         capabilities,
         limits.clone(),
-        args.artwork_dir.clone(),
+        artwork.map(|a| a.path),
     );
 
     let state = Arc::new(AppState {
@@ -299,6 +399,7 @@ async fn async_main(args: Args) -> i32 {
         devices: platform.devices,
         media: platform.media,
         manager: platform.manager,
+        artwork_dir: artwork_dir_str,
         cancel: CancellationToken::new(),
         shutdown_reason: Mutex::new(None),
     });

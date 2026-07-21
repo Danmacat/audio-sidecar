@@ -33,6 +33,7 @@ node tools/dev-client.mjs meter --pid 111 --pid 222 --default   # 单进程同�
 node tools/dev-client.mjs watch                 # 打印全部事件（拔插设备/切歌试试）
 node tools/dev-client.mjs media --watch --artwork cover.jpg
 node tools/dev-client.mjs media --artwork-dir .\artcache        # 封面落盘模式（哈希命名，事件带路径）
+node tools/dev-client.mjs media --artwork-dir                   # 不带值 = 落到系统临时目录（自动过期清理）
 node tools/dev-client.mjs pcm --seconds 5 --out cap.raw   # Audacity 按 raw 导入试听
 node tools/dev-client.mjs raw '{"method":"devices.getDefault","params":{"kind":"render"}}'
 ```
