@@ -91,6 +91,8 @@ PROTOCOL.md                 # 协议规范
 
 ## 路线图
 
+Linux 与 macOS 适配的**目标不变量、实施方案、验收清单与踩坑记录**统一维护在 [PORTING.md](./PORTING.md)——换平台开发时以它为准，防止目标漂移。概要：
+
 - **Linux**：libpulse threaded mainloop（monitor source + `set_monitor_stream` 按应用捕捉）、subscribe 热插拔、zbus MPRIS
 - **macOS**：Core Audio process tap（14.4+，`objc2-core-audio`）、coreaudio 输入、mediaremote-adapter 式 now-playing（best-effort）；TCC 权限挂宿主 .app
 - 可选：WebSocket 传输通道（渲染进程直连）、`capture.setSpectrumConfig` 热重配
