@@ -112,6 +112,18 @@ M3 正式实现继续验证了两个运行时细节：
   独立控制通道可稳定触发 `running -> restarting -> running` 并恢复捕捉；进程真正退出则在 2 秒内进入
   `failed:processExited`。流消失但 PID 仍存活时等待新 sink-input，不用固定超时误判进程退出。
 
+M4 健壮性验收结果：
+
+- Linux io 线程采用与 Windows 相同的 150/250/400/700/1200ms 激活重试梯；单次 Pulse stream ready
+  等待限制为 1 秒，使最坏重试窗口仍落在 manager 的 5 秒 ready timeout 内。`deviceNotFound` 与
+  `processExited` 是永久错误，不进入该重试梯。
+- 默认输出在真实 ALSA sink 与临时 null sink 之间往返时，两次均产生
+  `running -> restarting(defaultDeviceChanged) -> running`，回到原 sink 后 440Hz 捕捉恢复。显式 null
+  sink 卸载后产生 `restarting(deviceRemoved)`，以同名 sink 重建后经退避自动恢复 `running`。
+- 4 路 30fps 捕捉停读 stdout 5 秒后累计观察到 138 个 seq 空洞，恢复读取后持续响应；单路相同测试因
+  150 帧积压未超过 256 帧共享队列而不丢帧。stdin EOF 退出码为 0，stdout 仅含合法
+  `sidecar.exiting(stdinClosed)` 帧，无 sidecar 孤儿进程。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。

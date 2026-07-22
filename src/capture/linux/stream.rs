@@ -27,10 +27,11 @@ use crate::protocol::types::AudioFormat;
 
 use super::pulse::PulseClient;
 
-const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(4);
+const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(1);
 const IO_WAIT: Duration = Duration::from_millis(200);
 const FRAGMENT_MS: u64 = 20;
 const TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+const INIT_RETRY_DELAYS_MS: [u64; 5] = [150, 250, 400, 700, 1200];
 
 #[derive(Debug, Clone, Copy)]
 struct ProcessTarget {
@@ -121,10 +122,47 @@ fn run_io(
         }
     };
 
-    let mut context = match init_capture(&spec.source, stop) {
-        Ok(context) => context,
-        Err(error) => {
-            send_ready(Err(error));
+    // Pulse endpoints can reject the first activation while a device is
+    // waking or another stream is being released. Keep this bounded ladder
+    // inside the manager's ready timeout, while reporting permanent target
+    // disappearance immediately.
+    let mut context = None;
+    let mut last_error = None;
+    for attempt in 0..=INIT_RETRY_DELAYS_MS.len() {
+        if stop.load(Ordering::Relaxed) {
+            send_ready(Err(SessionError::Activation("stopped during init".into())));
+            return;
+        }
+        match init_capture(&spec.source, stop) {
+            Ok(value) => {
+                context = Some(value);
+                break;
+            }
+            Err(error @ SessionError::DeviceNotFound(_))
+            | Err(error @ SessionError::ProcessExited) => {
+                send_ready(Err(error));
+                return;
+            }
+            Err(error) => {
+                debug!(
+                    capture_id = spec.capture_id,
+                    attempt,
+                    error = %error,
+                    "PulseAudio capture init attempt failed"
+                );
+                last_error = Some(error);
+                if let Some(delay) = INIT_RETRY_DELAYS_MS.get(attempt) {
+                    std::thread::sleep(Duration::from_millis(*delay));
+                }
+            }
+        }
+    }
+    let mut context = match context {
+        Some(value) => value,
+        None => {
+            send_ready(Err(last_error.unwrap_or_else(|| {
+                SessionError::Activation("PulseAudio capture init failed".into())
+            })));
             return;
         }
     };
