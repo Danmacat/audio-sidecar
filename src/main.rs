@@ -123,7 +123,9 @@ fn platform_capabilities() -> Capabilities {
         device_loopback: true,
         follow_default_input: true,
         follow_default_output: true,
+        audio_process_list: true,
         pcm_stream: true,
+        process_loopback: true,
         spectrum: true,
         ..Capabilities::NONE
     }

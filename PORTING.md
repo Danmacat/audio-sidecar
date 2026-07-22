@@ -103,6 +103,15 @@ IPC：stdio NDJSON，协议传输无关。以上均为用户确认过的决策�
 `set_read_callback(None)` / `set_state_callback(None)` 注销，并保证 stream 先于 context/mainloop 销毁；否则
 context 断连期间仍可能回调已释放闭包并造成 SIGSEGV。正式捕捉线程的所有退出路径都必须遵守此顺序。
 
+M3 正式实现继续验证了两个运行时细节：
+
+- `processes.listAudio` 可按 PID 聚合 sink-input；双 `paplay` 的 dev-client 捕捉分别只在 440Hz（约 band 28）
+  与 4000Hz（约 band 50）出峰，`droppedGaps=0`，底层探针的目标功率约 0.044、串扰约 0.00001。
+- sink-input 移除通知必须使用独立于音频 read wake 的有界通道。二者共用容量 1 的通道时，连续 read wake
+  会令 `try_send` 丢掉控制事件。同 PID 的 libpulse-simple 探针将 sink-input 从 `#573` 重建为 `#586` 后，
+  独立控制通道可稳定触发 `running -> restarting -> running` 并恢复捕捉；进程真正退出则在 2 秒内进入
+  `failed:processExited`。流消失但 PID 仍存活时等待新 sink-input，不用固定超时误判进程退出。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。

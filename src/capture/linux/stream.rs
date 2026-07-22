@@ -9,6 +9,7 @@ use std::sync::mpsc::{Receiver, Sender as StdSender, SyncSender};
 use std::time::{Duration, Instant};
 
 use libpulse_binding as pulse;
+use pulse::context::subscribe::{Facility, InterestMaskSet, Operation};
 use pulse::def::BufferAttr;
 use pulse::sample::{Format, Spec};
 use pulse::stream::{FlagSet, PeekResult, State, Stream};
@@ -29,6 +30,13 @@ use super::pulse::PulseClient;
 const STREAM_READY_TIMEOUT: Duration = Duration::from_secs(4);
 const IO_WAIT: Duration = Duration::from_millis(200);
 const FRAGMENT_MS: u64 = 20;
+const TARGET_CHECK_INTERVAL: Duration = Duration::from_millis(500);
+
+#[derive(Debug, Clone, Copy)]
+struct ProcessTarget {
+    pid: u32,
+    sink_input: u32,
+}
 
 pub fn spawn(spec: CaptureSpec, wiring: SessionWiring) -> Result<SessionThreads, RpcError> {
     let (setup_tx, setup_rx) = std::sync::mpsc::channel::<WorkerSetup>();
@@ -129,12 +137,12 @@ fn run_io(
     });
     drop(setup_tx);
     send_ready(Ok(ReadyInfo {
-        device_id: Some(context.device_id.clone()),
+        device_id: context.device_id.clone(),
         format: context.format,
     }));
     debug!(
         capture_id = spec.capture_id,
-        device_id = context.device_id,
+        device_id = ?context.device_id,
         rate = context.format.sample_rate,
         channels = context.format.channels,
         "PulseAudio capture running"
@@ -155,8 +163,10 @@ struct IoContext {
     stream: Option<Stream>,
     client: PulseClient,
     wake_rx: Receiver<()>,
+    target_removed_rx: Option<Receiver<()>>,
     format: AudioFormat,
-    device_id: String,
+    device_id: Option<String>,
+    target: Option<ProcessTarget>,
 }
 
 impl Drop for IoContext {
@@ -173,16 +183,32 @@ impl Drop for IoContext {
 }
 
 fn init_capture(source: &ResolvedSource, stop: &AtomicBool) -> Result<IoContext, SessionError> {
-    let device_id = match source {
-        ResolvedSource::Device { device_id } => device_id,
-        ResolvedSource::Process { .. } => {
-            return Err(SessionError::Activation(
-                "process capture is not enabled".into(),
-            ));
+    let client = PulseClient::connect("audio-sidecar-capture").map_err(SessionError::Activation)?;
+    let resolved = match source {
+        ResolvedSource::Device { device_id } => {
+            let (source_name, native_spec) = resolve_device(&client, device_id)?;
+            ResolvedCapture {
+                source_name,
+                native_spec,
+                device_id: Some(device_id.clone()),
+                target: None,
+            }
+        }
+        ResolvedSource::Process { pid, exclude } => {
+            if *exclude {
+                return Err(SessionError::Activation(
+                    "process-exclude capture is not supported on Linux".into(),
+                ));
+            }
+            resolve_process(&client, *pid)?
         }
     };
-    let client = PulseClient::connect("audio-sidecar-capture").map_err(SessionError::Activation)?;
-    let (source_name, native_spec) = resolve_device(&client, device_id)?;
+    let ResolvedCapture {
+        source_name,
+        native_spec,
+        device_id,
+        target,
+    } = resolved;
     let format = AudioFormat {
         sample_rate: native_spec.rate,
         channels: u16::from(native_spec.channels.clamp(1, 2)),
@@ -194,7 +220,7 @@ fn init_capture(source: &ResolvedSource, stop: &AtomicBool) -> Result<IoContext,
     };
     if !requested_spec.is_valid() {
         return Err(SessionError::Activation(format!(
-            "invalid PulseAudio sample spec for {device_id}"
+            "invalid PulseAudio sample spec for capture"
         )));
     }
 
@@ -223,18 +249,47 @@ fn init_capture(source: &ResolvedSource, stop: &AtomicBool) -> Result<IoContext,
     };
     client
         .with_lock(|| {
-            stream.connect_record(Some(&source_name), Some(&attr), FlagSet::ADJUST_LATENCY)
+            if let Some(target) = target {
+                stream
+                    .set_monitor_stream(target.sink_input)
+                    .map_err(|error| {
+                        format!("set_monitor_stream({}): {error}", target.sink_input)
+                    })?;
+            }
+            stream
+                .connect_record(Some(&source_name), Some(&attr), FlagSet::ADJUST_LATENCY)
+                .map_err(|error| format!("connect_record({source_name}): {error}"))
         })
-        .map_err(|error| {
-            SessionError::Activation(format!("connect_record({source_name}): {error}"))
-        })?;
+        .map_err(SessionError::Activation)?;
+
+    let target_removed_rx = if let Some(target) = target {
+        let (target_removed_tx, target_removed_rx) = std::sync::mpsc::sync_channel(1);
+        client
+            .subscribe(
+                InterestMaskSet::SINK_INPUT,
+                move |facility, operation, index| {
+                    if facility == Some(Facility::SinkInput)
+                        && operation == Some(Operation::Removed)
+                        && index == target.sink_input
+                    {
+                        let _ = target_removed_tx.try_send(());
+                    }
+                },
+            )
+            .map_err(SessionError::Activation)?;
+        Some(target_removed_rx)
+    } else {
+        None
+    };
 
     let context = IoContext {
         stream: Some(stream),
         client,
         wake_rx,
+        target_removed_rx,
         format,
-        device_id: device_id.clone(),
+        device_id,
+        target,
     };
     wait_ready(&context, stop)?;
     Ok(context)
@@ -277,6 +332,41 @@ fn resolve_device(client: &PulseClient, device_id: &str) -> Result<(String, Spec
     }
 }
 
+struct ResolvedCapture {
+    source_name: String,
+    native_spec: Spec,
+    device_id: Option<String>,
+    target: Option<ProcessTarget>,
+}
+
+fn resolve_process(client: &PulseClient, pid: u32) -> Result<ResolvedCapture, SessionError> {
+    let input = client
+        .list_sink_inputs()
+        .map_err(SessionError::Activation)?
+        .into_iter()
+        .filter(|input| input.pid == Some(pid))
+        .min_by_key(|input| input.corked)
+        .ok_or(SessionError::ProcessExited)?;
+    let sink = client
+        .list_sinks()
+        .map_err(SessionError::Activation)?
+        .into_iter()
+        .find(|sink| sink.index == input.sink)
+        .ok_or_else(|| SessionError::Activation(format!("sink {} disappeared", input.sink)))?;
+    let source_name = sink.monitor_source_name.ok_or_else(|| {
+        SessionError::Activation(format!("sink {} has no monitor source", input.sink))
+    })?;
+    Ok(ResolvedCapture {
+        source_name,
+        native_spec: sink.sample_spec,
+        device_id: None,
+        target: Some(ProcessTarget {
+            pid,
+            sink_input: input.index,
+        }),
+    })
+}
+
 fn wait_ready(context: &IoContext, stop: &AtomicBool) -> Result<(), SessionError> {
     let deadline = Instant::now() + STREAM_READY_TIMEOUT;
     loop {
@@ -312,6 +402,7 @@ fn capture_loop(
     stop: &AtomicBool,
     stats: &SessionStats,
 ) -> Result<(), SessionError> {
+    let mut last_target_check = Instant::now();
     loop {
         if stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -320,12 +411,28 @@ fn capture_loop(
         if stop.load(Ordering::Relaxed) {
             return Ok(());
         }
+        if context
+            .target_removed_rx
+            .as_ref()
+            .is_some_and(|removed| removed.try_recv().is_ok())
+        {
+            return target_loss(context, stop);
+        }
+        if context.target.is_some() && last_target_check.elapsed() >= TARGET_CHECK_INTERVAL {
+            last_target_check = Instant::now();
+            if !target_present(context)? {
+                return target_loss(context, stop);
+            }
+        }
         let state = context
             .client
             .with_lock(|| context.stream.as_ref().expect("stream missing").get_state());
         match state {
             State::Ready => drain_packets(context, &mut producer, stats)?,
             State::Failed | State::Terminated => {
+                if context.target.is_some() {
+                    return target_loss(context, stop);
+                }
                 let error = context.client.with_context(|pulse| pulse.errno());
                 return Err(SessionError::Device(format!(
                     "PulseAudio stream entered {state:?}: {error}"
@@ -334,6 +441,45 @@ fn capture_loop(
             State::Unconnected | State::Creating => {}
         }
     }
+}
+
+fn target_present(context: &IoContext) -> Result<bool, SessionError> {
+    let target = context.target.expect("target missing");
+    Ok(context
+        .client
+        .list_sink_inputs()
+        .map_err(SessionError::Device)?
+        .into_iter()
+        .any(|input| input.index == target.sink_input))
+}
+
+fn target_loss(context: &IoContext, stop: &AtomicBool) -> Result<(), SessionError> {
+    let target = context.target.expect("target missing");
+    loop {
+        if stop.load(Ordering::Relaxed) {
+            return Ok(());
+        }
+        if !process_exists(target.pid) {
+            return Err(SessionError::ProcessExited);
+        }
+        let replacement = context
+            .client
+            .list_sink_inputs()
+            .map_err(SessionError::Device)?
+            .into_iter()
+            .find(|input| input.pid == Some(target.pid) && input.index != target.sink_input);
+        if replacement.is_some() {
+            return Err(SessionError::Device(format!(
+                "target process {0} recreated its audio stream",
+                target.pid
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn process_exists(pid: u32) -> bool {
+    std::fs::metadata(format!("/proc/{pid}")).is_ok()
 }
 
 fn drain_packets(

@@ -24,10 +24,8 @@ pub(crate) struct Sink {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Source {
-    pub index: u32,
     pub name: String,
     pub description: String,
-    pub monitor_of_sink: Option<u32>,
     pub sample_spec: Spec,
 }
 
@@ -35,7 +33,6 @@ pub(crate) struct Source {
 pub(crate) struct SinkInput {
     pub index: u32,
     pub sink: u32,
-    pub sample_spec: Spec,
     pub corked: bool,
     pub pid: Option<u32>,
     pub application_name: Option<String>,
@@ -96,10 +93,6 @@ impl PulseClient {
                 _ => std::thread::sleep(Duration::from_millis(10)),
             }
         }
-    }
-
-    pub fn mainloop(&self) -> Rc<RefCell<Mainloop>> {
-        Rc::clone(&self.mainloop)
     }
 
     pub fn context(&self) -> Rc<RefCell<Context>> {
@@ -198,10 +191,8 @@ impl PulseClient {
             .get_source_info_list(move |result| {
                 let item = match result {
                     ListResult::Item(info) => Some(Ok(Some(Source {
-                        index: info.index,
                         name: info.name.as_deref().unwrap_or_default().to_string(),
                         description: info.description.as_deref().unwrap_or_default().to_string(),
-                        monitor_of_sink: info.monitor_of_sink,
                         sample_spec: info.sample_spec,
                     }))),
                     ListResult::End => Some(Ok(None)),
@@ -227,7 +218,6 @@ impl PulseClient {
                         ListResult::Item(info) => Some(Ok(Some(SinkInput {
                             index: info.index,
                             sink: info.sink,
-                            sample_spec: info.sample_spec,
                             corked: info.corked,
                             pid: info
                                 .proplist

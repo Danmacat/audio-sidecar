@@ -19,7 +19,7 @@ use crate::protocol::{ErrorCode, RpcError};
 use crate::rpc::writer::EventTx;
 use crate::rpc::{DeviceService, SvcFuture};
 
-use super::pulse::PulseClient;
+use super::{processes, pulse::PulseClient};
 
 const DEFAULT_CHANGE_DEBOUNCE: Duration = Duration::from_millis(100);
 const IDLE_POLL: Duration = Duration::from_millis(250);
@@ -230,7 +230,7 @@ fn handle_cmd(client: &PulseClient, cmd: DevCmd) {
             let _ = reply.send(get_default(client, kind, role));
         }
         DevCmd::ListAudioProcesses { reply } => {
-            let _ = reply.send(Err(RpcError::unsupported()));
+            let _ = reply.send(processes::list(client));
         }
         DevCmd::Quit => unreachable!("handled by thread loop"),
     }

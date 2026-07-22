@@ -2,6 +2,7 @@
 //! same API is provided by pipewire-pulse.
 
 pub mod devices;
+mod processes;
 pub(crate) mod pulse;
 mod stream;
 
