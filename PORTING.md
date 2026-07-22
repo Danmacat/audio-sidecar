@@ -84,6 +84,25 @@ IPC：stdio NDJSON，协议传输无关。以上均为用户确认过的决策�
 
 检索关键词：`pipewire rust capture application stream`、`pw-stream target-object`、`libpulse set_monitor_stream pipewire`。
 
+### 3b. Linux 真机探针结论（2026-07-23）
+
+目标机为 PipeWire 1.6.2 的 PulseAudio 兼容服务（PulseAudio API 17.0，libpulse 17.0）。以下主选路线均已用
+最小 Rust spike 真机验证，因此 Linux 实现继续采用 §3 的 libpulse + zbus 路线，不启用替代梯队：
+
+- **`set_monitor_stream` 可用且隔离正确**：两个独立 `paplay` 进程同时播放 440Hz/4000Hz，分别按
+  `application.process.id` 找到 sink-input，并在 `connect_record` 前设置目标 index。两路目标频率功率均约
+  0.044，非目标频率仅 0.00001--0.00003（远优于 10 倍隔离门槛），说明 PipeWire-Pulse 没有退化成
+  整个 sink monitor。
+- **PID 属性在已测客户端存在**：`paplay` 与 GNOME Decibels 的 sink-input 均提供
+  `application.process.id`、`application.name`、`application.process.binary`。仍保留属性缺失时跳过 PID
+  匹配、只按已有字段展示的约定，不做猜测。
+- **zbus MPRIS 可用**：会话总线可枚举 `org.mpris.MediaPlayer2.org.gnome.Decibels`，并正确读取
+  `PlaybackStatus`、`Position` 与含 CJK 标题/作者的 `Metadata`。继续采用 zbus 手写 proxy。
+
+探针同时确认一个 libpulse 生命周期要求：`Stream` 的 Rust 回调闭包必须在 `disconnect` 前用
+`set_read_callback(None)` / `set_state_callback(None)` 注销，并保证 stream 先于 context/mainloop 销毁；否则
+context 断连期间仍可能回调已释放闭包并造成 SIGSEGV。正式捕捉线程的所有退出路径都必须遵守此顺序。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。
