@@ -3,6 +3,23 @@
 
 pub mod devices;
 pub(crate) mod pulse;
+mod stream;
+
+use crate::protocol::RpcError;
+
+use super::{CaptureBackend, CaptureSpec, SessionThreads, SessionWiring};
+
+pub struct LinuxBackend;
+
+impl CaptureBackend for LinuxBackend {
+    fn spawn_capture(
+        &self,
+        spec: CaptureSpec,
+        wiring: SessionWiring,
+    ) -> Result<SessionThreads, RpcError> {
+        stream::spawn(spec, wiring)
+    }
+}
 
 #[cfg(test)]
 mod probe;

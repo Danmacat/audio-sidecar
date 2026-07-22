@@ -49,8 +49,8 @@ pub(crate) struct Server {
 }
 
 pub(crate) struct PulseClient {
-    mainloop: Rc<RefCell<Mainloop>>,
     context: Rc<RefCell<Context>>,
+    mainloop: Rc<RefCell<Mainloop>>,
 }
 
 impl PulseClient {
@@ -80,7 +80,7 @@ impl PulseClient {
         }
         mainloop.borrow_mut().unlock();
 
-        let client = Self { mainloop, context };
+        let client = Self { context, mainloop };
         let deadline = Instant::now() + OP_TIMEOUT;
         loop {
             let state = client.context_state();
@@ -118,6 +118,19 @@ impl PulseClient {
         self.with_context(|ctx| ctx.get_state())
     }
 
+    pub fn with_lock<T>(&self, f: impl FnOnce() -> T) -> T {
+        struct Unlock<'a>(&'a PulseClient);
+        impl Drop for Unlock<'_> {
+            fn drop(&mut self) {
+                self.0.unlock();
+            }
+        }
+
+        self.lock();
+        let _unlock = Unlock(self);
+        f()
+    }
+
     pub fn subscribe(
         &self,
         mask: InterestMaskSet,
@@ -142,10 +155,7 @@ impl PulseClient {
     }
 
     pub fn with_context<T>(&self, f: impl FnOnce(&mut Context) -> T) -> T {
-        self.lock();
-        let value = f(&mut self.context.borrow_mut());
-        self.unlock();
-        value
+        self.with_lock(|| f(&mut self.context.borrow_mut()))
     }
 
     pub fn list_sinks(&self) -> Result<Vec<Sink>, String> {

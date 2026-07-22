@@ -118,7 +118,13 @@ fn platform_capabilities() -> Capabilities {
 #[cfg(target_os = "linux")]
 fn platform_capabilities() -> Capabilities {
     Capabilities {
+        device_capture: true,
         device_events: true,
+        device_loopback: true,
+        follow_default_input: true,
+        follow_default_output: true,
+        pcm_stream: true,
+        spectrum: true,
         ..Capabilities::NONE
     }
 }
@@ -190,7 +196,7 @@ fn init_platform(
     let manager = capture::manager::spawn_with_channel(
         mgr_tx,
         mgr_rx,
-        Arc::new(capture::StubBackend),
+        Arc::new(capture::linux::LinuxBackend),
         Some(devices.clone()),
         events,
         capabilities,
