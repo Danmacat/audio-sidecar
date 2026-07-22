@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use libpulse_binding as pulse;
 use pulse::callbacks::ListResult;
+use pulse::context::subscribe::{Facility, InterestMaskSet, Operation};
 use pulse::context::{Context, FlagSet as ContextFlagSet, State as ContextState};
 use pulse::mainloop::threaded::Mainloop;
 use pulse::proplist::Proplist;
@@ -23,6 +24,7 @@ pub(crate) struct Sink {
 
 #[derive(Debug, Clone)]
 pub(crate) struct Source {
+    pub index: u32,
     pub name: String,
     pub description: String,
     pub monitor_of_sink: Option<u32>,
@@ -116,6 +118,29 @@ impl PulseClient {
         self.with_context(|ctx| ctx.get_state())
     }
 
+    pub fn subscribe(
+        &self,
+        mask: InterestMaskSet,
+        callback: impl FnMut(Option<Facility>, Option<Operation>, u32) + 'static,
+    ) -> Result<(), String> {
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.lock();
+        self.context
+            .borrow_mut()
+            .set_subscribe_callback(Some(Box::new(callback)));
+        let operation = self.context.borrow_mut().subscribe(mask, move |success| {
+            let _ = tx.send(success);
+        });
+        self.unlock();
+        let result = match rx.recv_timeout(OP_TIMEOUT) {
+            Ok(true) => Ok(()),
+            Ok(false) => Err("PulseAudio subscription was rejected".into()),
+            Err(_) => Err("timed out subscribing to PulseAudio events".into()),
+        };
+        drop(operation);
+        result
+    }
+
     pub fn with_context<T>(&self, f: impl FnOnce(&mut Context) -> T) -> T {
         self.lock();
         let value = f(&mut self.context.borrow_mut());
@@ -163,6 +188,7 @@ impl PulseClient {
             .get_source_info_list(move |result| {
                 let item = match result {
                     ListResult::Item(info) => Some(Ok(Some(Source {
+                        index: info.index,
                         name: info.name.as_deref().unwrap_or_default().to_string(),
                         description: info.description.as_deref().unwrap_or_default().to_string(),
                         monitor_of_sink: info.monitor_of_sink,
@@ -242,7 +268,10 @@ impl PulseClient {
 impl Drop for PulseClient {
     fn drop(&mut self) {
         self.lock();
-        self.context.borrow_mut().disconnect();
+        let mut context = self.context.borrow_mut();
+        context.set_subscribe_callback(None);
+        context.disconnect();
+        drop(context);
         self.unlock();
         self.mainloop.borrow_mut().stop();
     }

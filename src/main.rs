@@ -84,7 +84,14 @@ fn os_version() -> String {
     format!("{}.{}.{}", v.major, v.minor, v.build)
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn os_version() -> String {
+    std::fs::read_to_string("/proc/sys/kernel/osrelease")
+        .map(|value| value.trim().to_string())
+        .unwrap_or_default()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn os_version() -> String {
     String::new()
 }
@@ -108,7 +115,15 @@ fn platform_capabilities() -> Capabilities {
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn platform_capabilities() -> Capabilities {
+    Capabilities {
+        device_events: true,
+        ..Capabilities::NONE
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn platform_capabilities() -> Capabilities {
     Capabilities::NONE
 }
@@ -162,7 +177,38 @@ fn init_platform(
     }
 }
 
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+fn init_platform(
+    events: EventTx,
+    capabilities: Capabilities,
+    limits: Limits,
+    _artwork_dir: Option<std::path::PathBuf>,
+) -> Platform {
+    let (mgr_tx, mgr_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dev = capture::linux::devices::spawn(events.clone(), mgr_tx.clone());
+    let devices: Arc<dyn DeviceService> = Arc::new(dev.handle.clone());
+    let manager = capture::manager::spawn_with_channel(
+        mgr_tx,
+        mgr_rx,
+        Arc::new(capture::StubBackend),
+        Some(devices.clone()),
+        events,
+        capabilities,
+        limits,
+    );
+    let dev_handle = dev.handle.clone();
+    Platform {
+        devices: Some(devices),
+        media: None,
+        manager,
+        shutdown: Box::new(move || {
+            dev_handle.quit();
+            let _ = dev.join.join();
+        }),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
 fn init_platform(
     events: EventTx,
     capabilities: Capabilities,
