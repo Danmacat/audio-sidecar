@@ -124,6 +124,8 @@ fn platform_capabilities() -> Capabilities {
         follow_default_input: true,
         follow_default_output: true,
         audio_process_list: true,
+        media_artwork: true,
+        media_sessions: true,
         pcm_stream: true,
         process_loopback: true,
         spectrum: true,
@@ -190,7 +192,7 @@ fn init_platform(
     events: EventTx,
     capabilities: Capabilities,
     limits: Limits,
-    _artwork_dir: Option<std::path::PathBuf>,
+    artwork_dir: Option<std::path::PathBuf>,
 ) -> Platform {
     let (mgr_tx, mgr_rx) = tokio::sync::mpsc::unbounded_channel();
     let dev = capture::linux::devices::spawn(events.clone(), mgr_tx.clone());
@@ -200,18 +202,23 @@ fn init_platform(
         mgr_rx,
         Arc::new(capture::linux::LinuxBackend),
         Some(devices.clone()),
-        events,
+        events.clone(),
         capabilities,
         limits,
     );
+    let media_worker = media::linux::spawn(events, artwork_dir);
+    let media: Arc<dyn MediaService> = Arc::new(media_worker.handle.clone());
     let dev_handle = dev.handle.clone();
+    let media_handle = media_worker.handle.clone();
     Platform {
         devices: Some(devices),
-        media: None,
+        media: Some(media),
         manager,
         shutdown: Box::new(move || {
             dev_handle.quit();
+            media_handle.quit();
             let _ = dev.join.join();
+            let _ = media_worker.join.join();
         }),
     }
 }

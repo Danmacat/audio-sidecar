@@ -124,6 +124,21 @@ M4 健壮性验收结果：
   150 帧积压未超过 256 帧共享队列而不丢帧。stdin EOF 退出码为 0，stdout 仅含合法
   `sidecar.exiting(stdinClosed)` 帧，无 sidecar 孤儿进程。
 
+M5 媒体与封面验收结果：
+
+- 正式实现使用 zbus match rule 监听 `NameOwnerChanged`、`PropertiesChanged` 与 `Seeked`；只有 MPRIS
+  没有信号的 `Position` 以 250ms 周期轮询，另以 5 秒全量重同步兼容漏发信号的播放器。GNOME Decibels
+  的 Play/Pause 可即时触发 `playbackInfo`，4 秒播放窗口收到 6 个纯 timeline 事件，事件间隔不小于约
+  500ms，满足每会话不超过 2 次/秒。
+- Decibels 实测快照保真返回日文标题 `メルト (かぐや ver.) [CPK! Remix]` 及混合日文作者，状态、时长、
+  repeat/shuffle 与 current 映射正确。临时 MPRIS 标准探针的出现/退出分别触发全量 `sessionsChanged`，
+  current 同步切入及回到 null，说明名称监听与会话生命周期有效。
+- Decibels 本身不发布 `mpris:artUrl`（含内嵌封面的本地 MP3 也不发布），这属于播放器能力而非 zbus
+  路线失效；使用发布 `file:` artUrl 的标准 MPRIS 探针补验。295 字节 PNG 经 base64、`writeTo` 与
+  `--artwork-dir` 三条路径均返回 `image/png`，两种落盘得到同一 FNV 内容哈希
+  `6516d5c0ced3f88c`；自动落盘先发无路径会话快照，再独立发一次 `changed=["artwork"]`。读取在后台
+  执行并以 generation 丢弃过期结果。`http(s)` artUrl 只透传 `artworkUrl`，sidecar 不发起网络请求。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。
