@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use base64::Engine as _;
@@ -65,10 +66,15 @@ enum MediaCmd {
 #[derive(Clone)]
 pub struct MediaHandle {
     tx: mpsc::UnboundedSender<MediaCmd>,
+    shutdown: Arc<Mutex<bool>>,
 }
 
 impl MediaHandle {
     pub fn quit(&self) {
+        *self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
         let _ = self.tx.send(MediaCmd::Quit);
     }
 }
@@ -135,12 +141,14 @@ pub struct MediaWorker {
 pub fn spawn(events: EventTx, artwork_dir: Option<PathBuf>) -> MediaWorker {
     let (tx, rx) = mpsc::unbounded_channel();
     let worker_tx = tx.clone();
+    let shutdown = Arc::new(Mutex::new(false));
+    let worker_shutdown = shutdown.clone();
     let join = std::thread::Builder::new()
         .name("mpris-media-worker".into())
-        .spawn(move || thread_main(rx, worker_tx, events, artwork_dir))
+        .spawn(move || thread_main(rx, worker_tx, worker_shutdown, events, artwork_dir))
         .expect("failed to spawn MPRIS media worker");
     MediaWorker {
-        handle: MediaHandle { tx },
+        handle: MediaHandle { tx, shutdown },
         join,
     }
 }
@@ -156,6 +164,7 @@ struct Tracked {
 struct WorkerState {
     connection: Connection,
     cmd_tx: mpsc::UnboundedSender<MediaCmd>,
+    shutdown: Arc<Mutex<bool>>,
     events: EventTx,
     artwork_dir: Option<PathBuf>,
     sessions: HashMap<String, Tracked>,
@@ -169,6 +178,7 @@ struct WorkerState {
 fn thread_main(
     rx: mpsc::UnboundedReceiver<MediaCmd>,
     cmd_tx: mpsc::UnboundedSender<MediaCmd>,
+    shutdown: Arc<Mutex<bool>>,
     events: EventTx,
     artwork_dir: Option<PathBuf>,
 ) {
@@ -195,6 +205,7 @@ fn thread_main(
         let worker = WorkerState {
             connection,
             cmd_tx,
+            shutdown,
             events,
             artwork_dir: artwork_dir.and_then(|dir| match std::fs::create_dir_all(&dir) {
                 Ok(()) => Some(dir),
@@ -274,7 +285,19 @@ impl WorkerState {
             SignalFilter::None,
         )
         .await;
+        let mut queued = Vec::new();
+        loop {
+            match rx.try_recv() {
+                Ok(MediaCmd::Quit) => return,
+                Ok(cmd) => queued.push(cmd),
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => return,
+            }
+        }
         self.refresh_all().await;
+        for cmd in queued {
+            self.handle_cmd(cmd);
+        }
 
         let mut position_tick = tokio::time::interval(POSITION_POLL_INTERVAL);
         position_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -440,7 +463,7 @@ impl WorkerState {
         if !self.initialized {
             self.initialized = true;
             let snapshot = self.snapshot_result();
-            self.events.send_event(&Event::MediaSessionsChanged {
+            self.send_event(&Event::MediaSessionsChanged {
                 sessions: snapshot.sessions,
                 current_session_id: snapshot.current_session_id,
             });
@@ -449,7 +472,7 @@ impl WorkerState {
         }
         if names_changed {
             let snapshot = self.snapshot_result();
-            self.events.send_event(&Event::MediaSessionsChanged {
+            self.send_event(&Event::MediaSessionsChanged {
                 sessions: snapshot.sessions,
                 current_session_id: snapshot.current_session_id,
             });
@@ -541,7 +564,7 @@ impl WorkerState {
             .as_ref()
             .and_then(|id| self.sessions.get(id))
             .map(|tracked| tracked.session.clone());
-        self.events.send_event(&Event::MediaCurrentChanged {
+        self.send_event(&Event::MediaCurrentChanged {
             current_session_id: self.current.clone(),
             session,
         });
@@ -549,10 +572,20 @@ impl WorkerState {
 
     fn emit_update(&self, name: &str, changed: Vec<MediaChangeKind>) {
         if let Some(tracked) = self.sessions.get(name) {
-            self.events.send_event(&Event::MediaSessionUpdated {
+            self.send_event(&Event::MediaSessionUpdated {
                 session: tracked.session.clone(),
                 changed,
             });
+        }
+    }
+
+    fn send_event(&self, event: &Event) {
+        let shutdown = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if !*shutdown {
+            self.events.send_event(event);
         }
     }
 
@@ -651,7 +684,7 @@ impl WorkerState {
         tracked.session.artwork_file = Some(cached.file);
         tracked.session.artwork_hash = Some(cached.hash);
         let session = tracked.session.clone();
-        self.events.send_event(&Event::MediaSessionUpdated {
+        self.send_event(&Event::MediaSessionUpdated {
             session,
             changed: vec![MediaChangeKind::Artwork],
         });

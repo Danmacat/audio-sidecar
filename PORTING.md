@@ -139,6 +139,28 @@ M5 媒体与封面验收结果：
   `6516d5c0ced3f88c`；自动落盘先发无路径会话快照，再独立发一次 `changed=["artwork"]`。读取在后台
   执行并以 generation 丢弃过期结果。`http(s)` artUrl 只透传 `artworkUrl`，sidecar 不发起网络请求。
 
+M6 全量验收结果（PipeWire 1.6.2 / Pulse API 17.0，2026-07-23）：
+
+- **默认输出**：真实 440Hz 播放经 `tools/dev-client.mjs meter --default` 在约 band 28 出峰，峰值条到 `█`，
+  连续 4 秒 `droppedGaps=0`。
+- **进程隔离**：两个 PID 的 dev-client 行分别只在 band 28 与 band 50 出峰且各自 `droppedGaps=0`；
+  libpulse 监视探针测得 A=`440:0.04422, 4000:0.00003`、B=`440:0.00003, 4000:0.04417`。
+- **静音衰减**：停止 440Hz 播放后约 1 秒，连续输出 `rms=0.000`、所有 band 为空，满足 0.5 秒目标。
+- **PCM**：`pcm --seconds 3` 得到 48kHz/2ch/s16le 的 576,000 字节（60×50ms，数学值精确）。
+- **进程退出**：杀掉目标 paplay 后约 2 秒内收到 `capture.state failed`，reason=`processExited`，没有自动
+  重启。
+- **设备恢复**：真实默认 sink ↔ 临时 null sink 往返两次均为
+  `restarting(defaultDeviceChanged) -> running`；临时显式 sink 卸载/重建为
+  `restarting(deviceRemoved) -> running`。重启期间 dev-client 按 capture.state 开启新的 seq epoch，避免把
+  合法重挂误报为负的 dropped gap。
+- **媒体/封面**：M5 的 CJK、会话、事件、封面和 ≤2Hz timeline 结果同时通过。
+- **背压**：4 路捕捉停读 5 秒后观察到 `droppedGaps=140`，恢复读后持续出帧、sidecar 仍响应。
+- **生命周期**：立即 EOF 压测 30 次均 exit 0，`sidecar.exiting(stdinClosed)` 是最后一帧且无孤儿；正常
+  shutdown 也经过 Linux 事件生产者 quiesce，`sidecar.exiting(shutdown)` 保持最终可靠消息。
+- **协议回归**：hello 报告 Linux 全部已实现能力，`processLoopbackExclude=false`；排除进程调用返回
+  `unsupported`；`--capture` 的 15fps/32-band 配置与 `capture.list` 回显一致；`writeTo`、裸
+  `--artwork-dir` 和未知方法/会话错误码均符合 `PROTOCOL.md`。
+
 ## 4. macOS 实施方案
 
 **依赖**：`objc2-core-audio`（process tap 绑定）、`coreaudio-rs`（输入/枚举），参考实现 insidegui/AudioCap。

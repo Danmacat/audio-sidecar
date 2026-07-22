@@ -9,12 +9,12 @@
 
 音频在 sidecar 内完成 DSP（FFT → 对数分 band → AGC/噪声门 → 攻击衰减平滑），以 Wallpaper Engine 风格的频谱帧（默认 2×64 band @30fps，仅 ~27KB/s）推送给宿主；可选原始 PCM 流。协议为 stdio NDJSON，规范见 [PROTOCOL.md](./PROTOCOL.md)，TypeScript 类型见 [bindings/](./bindings)。
 
-当前状态：**Windows 全功能已实现并验证**；Linux（PulseAudio/PipeWire + MPRIS）与 macOS（Core Audio tap + MediaRemote-adapter）为规划阶段，跨平台 trait 与 capability 协商已就位。
+当前状态：**Windows 与 Linux 全功能已实现并验证**（Linux 在 PipeWire 1.6.2 的 PulseAudio 兼容层实测）；macOS（Core Audio tap + MediaRemote-adapter）仍为规划阶段，跨平台 trait 与 capability 协商已就位。
 
 ## 构建与测试
 
-```powershell
-cargo build                # 调试构建 → target/debug/audio-sidecar.exe
+```sh
+cargo build                # 调试构建 → target/debug/audio-sidecar[.exe]
 cargo build --release      # 发布构建（thin-LTO）
 cargo test                 # 单元测试（DSP 数学、协议 serde、PCM 编码）
 cargo test --features ts-export   # 同时重新生成 bindings/*.ts
@@ -23,7 +23,7 @@ cargo clippy --all-targets -- -D warnings
 
 ## 快速验证（tools/dev-client.mjs，零依赖 Node ≥18）
 
-```powershell
+```sh
 node tools/dev-client.mjs hello                 # 握手与能力
 node tools/dev-client.mjs devices               # 设备列表
 node tools/dev-client.mjs apps                  # 有音频会话的进程（捕捉选择器数据源）
@@ -56,7 +56,16 @@ node tools/dev-client.mjs raw '{"method":"devices.getDefault","params":{"kind":"
 - ✅ `--capture` 启动参数：免 RPC 自启动捕捉，含每路独立 spectrum 配置（30fps/64band 与 15fps/32band 并行）
 - ✅ `--artwork-dir` 封面落盘：真实播放器（SPlayer）封面以哈希名原子写出（魔数嗅探出 .jpg），`changed=["artwork"]` 事件带路径与哈希
 
-待手动验证（需要物理操作）：
+Linux / PipeWire 1.6.2（Pulse API 17.0）实测：
+
+- ✅ 默认输出 440Hz 在 band 28 出峰，连续 4 秒 30fps 无 seq 空洞；静音停止后约 1 秒 RMS 与频谱归零
+- ✅ 双 PID 440/4000Hz 监视流隔离：目标功率约 0.044，串扰不超过 0.00003；`processLoopbackExclude=false` 且调用返回 `unsupported`
+- ✅ PCM：3 秒 s16le 精确 576,000 字节；进程退出在 2 秒内 `failed:processExited`
+- ✅ 默认 sink 切换、显式 sink 卸载/重建均自动恢复；4 路停读 5 秒丢 140 帧后恢复
+- ✅ MPRIS：真实 Decibels CJK 元数据/Play-Pause/Position 轮询与事件节流；标准探针验证 file/data 封面、base64、`writeTo`、`--artwork-dir` 与 artwork 事件
+- ✅ 30 次 EOF 生命周期压测 exit 0、无孤儿；`--capture` 15fps/32-band 配置回显正确
+
+补充手动验证（不影响上述 M6 自动化验收，需要物理操作或长期观测）：
 
 - ⬜ 播放音乐时在系统设置切默认输出 → `restarting → running` 后频谱在新设备继续
 - ⬜ 拔掉被捕捉的 USB 设备 → 退避重启循环，插回自动恢复
@@ -72,8 +81,10 @@ src/
 ├── capture/
 │   ├── manager.rs          # 会话 actor：生命周期、follow-default、重启退避
 │   ├── session.rs          # 平台无关 DSP worker 线程（补零、频谱、PCM 切块）
+│   ├── linux/              # libpulse threaded mainloop：设备/monitor/按 PID 捕捉
 │   └── windows/            # WASAPI：设备/进程捕捉、dev-mgr 线程、会话枚举
 ├── dsp/                    # 纯函数：Hann+FFT、对数分 band、AGC+噪声门、平滑
+├── media/linux.rs          # zbus MPRIS worker（信号驱动 + Position 轮询 + 封面缓存）
 ├── media/windows.rs        # SMTC worker 线程（事件脏标记→快照 diff→节流推送）
 └── util/                   # PCM 编码、浮点清洗
 tools/dev-client.mjs        # 调试/验证客户端
@@ -87,6 +98,7 @@ PROTOCOL.md                 # 协议规范
 - 频谱/PCM 走有界通道，宿主卡顿只丢帧不反压音频线程；响应与状态事件走可靠通道
 - 静音=按 tick 补零一条规则，覆盖启动/无声/停顿，衰减动画与 PCM 连续性自然成立
 - 设备失效/默认切换自动重启（200ms→5s 退避），进程退出交宿主决策
+- Linux PulseAudio/PipeWire I/O 固定在 threaded mainloop；MPRIS zbus 调用固定在专用 worker，tokio 只做协调
 - `deny(print_stdout)` + 单写者任务，从编译期杜绝 stdout 协议污染
 
 ## 路线图

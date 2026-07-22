@@ -143,6 +143,10 @@ struct Platform {
     devices: Option<Arc<dyn DeviceService>>,
     media: Option<Arc<dyn MediaService>>,
     manager: ManagerHandle,
+    /// Stop Linux event producers before `sidecar.exiting` is enqueued, so
+    /// that event remains the final reliable frame.
+    #[cfg(target_os = "linux")]
+    quiesce: Box<dyn FnOnce() + Send>,
     /// Ask platform threads to quit and reap them (blocking, bounded by the
     /// caller's timeout + the shutdown watchdog).
     shutdown: Box<dyn FnOnce() + Send>,
@@ -214,9 +218,11 @@ fn init_platform(
         devices: Some(devices),
         media: Some(media),
         manager,
-        shutdown: Box::new(move || {
+        quiesce: Box::new(move || {
             dev_handle.quit();
             media_handle.quit();
+        }),
+        shutdown: Box::new(move || {
             let _ = dev.join.join();
             let _ = media_worker.join.join();
         }),
@@ -475,6 +481,8 @@ async fn async_main(args: Args) -> i32 {
     });
 
     info!(?reason, "shutting down");
+    #[cfg(target_os = "linux")]
+    (platform.quiesce)();
     events.send_event(&Event::SidecarExiting { reason });
     state.manager.stop_all(Duration::from_millis(2500)).await;
     let shutdown = platform.shutdown;

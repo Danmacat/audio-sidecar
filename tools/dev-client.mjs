@@ -229,13 +229,21 @@ async function main() {
         bands: Number(flag1("bands") ?? 64),
         fps: Number(flag1("fps") ?? 30),
       };
-      c.on((event, data) => {
-        if (event === "capture.state") console.error(`[state] ${JSON.stringify(data)}`);
-      });
-
       // All sources run concurrently in this ONE sidecar process; frames are
       // demultiplexed by captureId.
       const caps = new Map(); // captureId -> render state
+      c.on((event, data) => {
+        if (event !== "capture.state") return;
+        console.error(`[state] ${JSON.stringify(data)}`);
+        // A restarted worker begins a new frame-sequence epoch. Reset the
+        // local expectation so an intentional reattach is not counted as a
+        // negative or enormous backpressure gap.
+        if (data.state === "restarting" || data.state === "running") {
+          const state = caps.get(data.captureId);
+          if (state) state.seq = -1;
+        }
+      });
+
       for (const source of sources) {
         const started = await c.call("capture.start", { source, spectrum });
         caps.set(started.captureId, {
