@@ -91,7 +91,12 @@ fn os_version() -> String {
         .unwrap_or_default()
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn os_version() -> String {
+    capture::macos::hal::os_product_version()
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn os_version() -> String {
     String::new()
 }
@@ -133,7 +138,18 @@ fn platform_capabilities() -> Capabilities {
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn platform_capabilities() -> Capabilities {
+    // M1 milestone: device enumeration/events and the audio-process list.
+    // Capture capabilities light up with M2/M3, media with M5.
+    Capabilities {
+        audio_process_list: true,
+        device_events: true,
+        ..Capabilities::NONE
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn platform_capabilities() -> Capabilities {
     Capabilities::NONE
 }
@@ -143,9 +159,9 @@ struct Platform {
     devices: Option<Arc<dyn DeviceService>>,
     media: Option<Arc<dyn MediaService>>,
     manager: ManagerHandle,
-    /// Stop Linux event producers before `sidecar.exiting` is enqueued, so
+    /// Stop platform event producers before `sidecar.exiting` is enqueued, so
     /// that event remains the final reliable frame.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     quiesce: Box<dyn FnOnce() + Send>,
     /// Ask platform threads to quit and reap them (blocking, bounded by the
     /// caller's timeout + the shutdown watchdog).
@@ -229,7 +245,41 @@ fn init_platform(
     }
 }
 
-#[cfg(not(any(windows, target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn init_platform(
+    events: EventTx,
+    capabilities: Capabilities,
+    limits: Limits,
+    artwork_dir: Option<std::path::PathBuf>,
+) -> Platform {
+    let (mgr_tx, mgr_rx) = tokio::sync::mpsc::unbounded_channel();
+    let dev = capture::macos::devices::spawn(events.clone(), mgr_tx.clone());
+    let devices: Arc<dyn DeviceService> = Arc::new(dev.handle.clone());
+    let manager = capture::manager::spawn_with_channel(
+        mgr_tx,
+        mgr_rx,
+        Arc::new(capture::macos::MacOsBackend),
+        Some(devices.clone()),
+        events.clone(),
+        capabilities,
+        limits,
+    );
+    // Media (M5): MediaRemote via the mediaremote-adapter helper.
+    let _ = artwork_dir;
+    let media: Option<Arc<dyn MediaService>> = None;
+    let dev_handle = dev.handle.clone();
+    Platform {
+        devices: Some(devices),
+        media,
+        manager,
+        quiesce: Box::new(move || dev_handle.quit()),
+        shutdown: Box::new(move || {
+            let _ = dev.join.join();
+        }),
+    }
+}
+
+#[cfg(not(any(windows, target_os = "linux", target_os = "macos")))]
 fn init_platform(
     events: EventTx,
     capabilities: Capabilities,
@@ -481,7 +531,7 @@ async fn async_main(args: Args) -> i32 {
     });
 
     info!(?reason, "shutting down");
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     (platform.quiesce)();
     events.send_event(&Event::SidecarExiting { reason });
     state.manager.stop_all(Duration::from_millis(2500)).await;
