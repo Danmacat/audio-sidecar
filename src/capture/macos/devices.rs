@@ -59,9 +59,9 @@ enum Msg {
 
 #[derive(Debug, Clone, Copy)]
 enum HalEvent {
-    DevicesChanged,
-    DefaultOutputChanged,
-    DefaultInputChanged,
+    DeviceList,
+    DefaultOutput,
+    DefaultInput,
 }
 
 #[derive(Clone)]
@@ -179,10 +179,10 @@ fn thread_main(
             Ok(Msg::Hal(event)) => {
                 debug!(?event, "Core Audio property change");
                 match event {
-                    HalEvent::DevicesChanged => {
+                    HalEvent::DeviceList => {
                         refresh_snapshot(&mut snapshot, &mut pending, &events, &manager)
                     }
-                    HalEvent::DefaultOutputChanged | HalEvent::DefaultInputChanged => {
+                    HalEvent::DefaultOutput | HalEvent::DefaultInput => {
                         refresh_defaults(&mut snapshot, &mut pending)
                     }
                 }
@@ -209,12 +209,12 @@ unsafe fn install_listeners(
     ) -> i32 {
         let selector = unsafe { address.as_ref().mSelector };
         let event = if selector == SELECTOR_DEVICES {
-            HalEvent::DevicesChanged
+            HalEvent::DeviceList
         } else if selector == SELECTOR_DEFAULT_OUTPUT || selector == SELECTOR_DEFAULT_SYSTEM {
             // System default feeds the same debounced render path.
-            HalEvent::DefaultOutputChanged
+            HalEvent::DefaultOutput
         } else if selector == SELECTOR_DEFAULT_INPUT {
-            HalEvent::DefaultInputChanged
+            HalEvent::DefaultInput
         } else {
             return 0;
         };

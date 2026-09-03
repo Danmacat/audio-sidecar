@@ -140,8 +140,10 @@ fn platform_capabilities() -> Capabilities {
 
 #[cfg(target_os = "macos")]
 fn platform_capabilities() -> Capabilities {
-    // Milestone state: M1 devices/events + process list, M2 device
-    // loopback/input capture, M3 process taps. Media (M5) follows.
+    // Media is best-effort: it needs the mediaremote-adapter packaging
+    // assets (PORTING.md §4b probe #2) and can be broken by any macOS
+    // update; capture never depends on it.
+    let media = media::macos::adapter_assets_available();
     Capabilities {
         audio_process_list: true,
         device_capture: true,
@@ -149,11 +151,12 @@ fn platform_capabilities() -> Capabilities {
         device_loopback: true,
         follow_default_input: true,
         follow_default_output: true,
+        media_artwork: media,
+        media_sessions: media,
         pcm_stream: true,
         process_loopback: true,
         process_loopback_exclude: true,
         spectrum: true,
-        ..Capabilities::NONE
     }
 }
 
@@ -272,17 +275,24 @@ fn init_platform(
         capabilities,
         limits,
     );
-    // Media (M5): MediaRemote via the mediaremote-adapter helper.
-    let _ = artwork_dir;
-    let media: Option<Arc<dyn MediaService>> = None;
+    // Media (M5): MediaRemote via the mediaremote-adapter helper. When the
+    // assets are absent the worker still runs and serves errors, matching
+    // the capability probe.
+    let media_worker = media::macos::spawn(events, artwork_dir);
+    let media: Arc<dyn MediaService> = Arc::new(media_worker.handle.clone());
     let dev_handle = dev.handle.clone();
+    let media_handle = media_worker.handle.clone();
     Platform {
         devices: Some(devices),
-        media,
+        media: Some(media),
         manager,
-        quiesce: Box::new(move || dev_handle.quit()),
+        quiesce: Box::new(move || {
+            dev_handle.quit();
+            media_handle.quit();
+        }),
         shutdown: Box::new(move || {
             let _ = dev.join.join();
+            let _ = media_worker.join.join();
         }),
     }
 }

@@ -603,6 +603,9 @@ fn agg_counter_next() -> u64 {
 
 /// Owns a running IOProc plus whatever backs it (tap + aggregate). `drop`
 /// stops everything in reverse order; late callbacks see `stopped` first.
+/// The block mirrors Core Audio's 5-argument IOProc signature; too intrinsic
+/// to factor further.
+#[allow(clippy::type_complexity)]
 struct CaptureChain {
     device: AudioObjectID,
     io_proc: AudioDeviceIOProcID,

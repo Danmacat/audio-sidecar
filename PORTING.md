@@ -248,6 +248,59 @@ M6 全量验收结果（PipeWire 1.6.2 / Pulse API 17.0，2026-07-23）：
   Microphone/ListenEvent/PostEvent`（清除了全机这些服务的既有授权记录，受影响应用下次使用会
   重新弹窗）。
 
+### 4c. macOS 实施与验收记录（2026-09-04，macOS 26.6.2 / arm64）
+
+实现完全落在 `capture/macos/`（hal 属性助手 + devices 设备线程 + stream 捕获线程）与
+`media/macos.rs`，平台无关代码未动（manager/session/dsp/protocol 原样复用）。依赖钉死
+`objc2 0.6.4 / objc2-core-audio 0.3.2 / block2 0.6.2`。设备 wire id：`ca:out:<UID>` /
+`ca:in:<UID>`。进程树用 libproc `proc_listallpids`+`proc_pidinfo`（`proc_bsdinfo` 的
+pid@12/ppid@16 偏移来自 SDK 头文件，非猜测）。
+
+已验证项（§5 清单口径）：
+
+- **M1 设备**：`devices.list` 正确列出内置扬声器（默认）与 HDMI 显示器（`ca:out:` 前缀 +
+  48kHz/2ch 格式）；`processes.listAudio` 以 output-scope `IsRunningOutput` 区分 active
+  （afplay 播放中正确标 active，排序正确）。CI 增加 macos-latest runner。
+- **M2 设备捕捉**：默认输出 440Hz 在 band 28 出峰（峰值 0.985，`droppedGaps=0`）；显式
+  `--device` 路径 4000Hz 在 band 50 出峰；静音停止后 699ms 峰值 <0.01（含 tap 缓冲排空
+  滞后，与 Linux ~1s 同量级）；PCM 5s 连续 99 块无空洞、`firstSampleIndex` 精确递增无钟漂。
+  输入设备（`ca:in:`）走标准 HAL IOProc 直读，**本机无输入设备未实测**——路径与已实测的
+  设备级 tap 输入同构（同一 IOProc 机制）。
+- **M3 进程捕捉**：双进程 440/4000Hz 隔离在 AGC 收敛窗口 avg/max 均为
+  A=0.985/0.000、B=0.000/0.985（零串扰）；exclude 模式对称正确；SIGKILL 目标后 ~170ms
+  `failed:processExited` 不自动重启；树重建实测：父进程顺序 spawn 播放子进程时自动
+  `restarting(deviceInvalidated) → running`（重建空隙 232ms，含 manager 200ms 首次退避；
+  tap 本身建/拆 ~10ms），子进程切换后频率跟随正确。macOS 26 上 tap 打开
+  `processRestoreEnabled`（版本守卫，<26 不调该 selector 避免 unrecognized selector）。
+  排查记录：进程树成员比较必须排序——HashMap 遍历序随机曾导致成员集合"永远变化"→
+  重建风暴（7s 内 8 次 restarts），排序后精确 1 次。
+- **M4 健壮性**：默认输出在内置扬声器 ↔ HDMI 显示器间往返切换均
+  `restarting(defaultDeviceChanged) → running`（deviceId 随之更新）；4 路 30fps 停读 5s
+  总丢帧 139（Linux 为 140，帧通道行为一致）、进程存活且 `capture.list` 响应正常、恢复
+  读后出帧；stdin EOF 立即关闭压测 30/30 exit 0 且 `sidecar.exiting(stdinClosed)` 恒为
+  最后一帧、无孤儿；`shutdown` 优雅路径 exit 0。
+- **M5 媒体（无音频部分）**：`media/macos.rs` spawn `/usr/bin/perl mediaremote-adapter.pl
+  <framework> stream --micros`，NDJSON 帧合并（全量+diff）→ 会话映射 → 事件（timeline
+  ≤2/s 节流 + pending flush，与 Linux 同语义）；封面 base64 → 魔数嗅探 → 内容哈希落盘
+  （`--artwork-dir`/`writeTo` 共享缓存）。资产在 `assets/macos/mediaremote-adapter/` 入库
+  （BSD-3 LICENSE 附带），build.rs 在 macos 构建时复制到二进制旁（framework 符号链接需
+  重建）。无播放时实测：启动推空 `sessionsChanged`、`getSessions`/`getCurrent` 返回空、
+  `getArtwork` 回 `sessionNotFound`；`perl … get` 仍 exit 0（探针②路线存活）。
+- **协议回归**：`--print-hello` 报 platform=macos、osVersion=26.6.2、12 项 capability；
+  methodNotFound / invalidParams（spectrum+pcm 全关、bands 超限）/ captureNotFound /
+  deviceNotFound / processNotFound 全部正确；`--capture` 双路启动（15fps/32band 与默认）
+  配置回显与 Linux 一致。
+
+待真机播放验证项（环境暂不便播放音频，等所有者确认后执行）：
+
+- 真实播放器（Music/网易云）的会话快照/元数据（含 CJK）/播放暂停事件/timeline 节流实测；
+  封面落盘（`changed=["artwork"]` 事件 + 哈希命名）与 `media.getArtwork` base64/writeTo。
+- Safari 主进程 pid 捕捉是否覆盖 WebKit.GPU 子进程音频（树枚举已按 pid 关系覆盖，实测留
+  真机；macOS 26 的 `bundleIDs`/`processRestoreEnabled` 未启用按 bundle 匹配，保持树语义）。
+- 被捕捉 USB/蓝牙设备物理拔插 → `restarting(deviceRemoved)` 循环与插回自动恢复；无线耳机
+  首次激活唤醒（激活重试梯已就位，实测留真机）。
+- §5 全量清单的统一复测（M6 收口）。
+
 ## 5. 验收标准（每个平台完成时必须全过）
 
 自动化（`cargo test` 平台无关部分本来就过，以下是平台实测，参考本仓库 Windows 验证时的探针方法——生成双频正弦 WAV 由两个进程分别循环播放）：

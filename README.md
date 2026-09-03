@@ -9,7 +9,7 @@
 
 音频在 sidecar 内完成 DSP（FFT → 对数分 band → AGC/噪声门 → 攻击衰减平滑），以 Wallpaper Engine 风格的频谱帧（默认 2×64 band @30fps，仅 ~27KB/s）推送给宿主；可选原始 PCM 流。协议为 stdio NDJSON，规范见 [PROTOCOL.md](./PROTOCOL.md)，TypeScript 类型见 [bindings/](./bindings)。
 
-当前状态：**Windows 与 Linux 全功能已实现并验证**（Linux 在 PipeWire 1.6.2 的 PulseAudio 兼容层实测）；macOS（Core Audio tap + MediaRemote-adapter）仍为规划阶段，跨平台 trait 与 capability 协商已就位。
+当前状态：**Windows 与 Linux 全功能已实现并验证**（Linux 在 PipeWire 1.6.2 的 PulseAudio 兼容层实测）；**macOS 已实现**（macOS 26.6.2 实测：设备 loopback/进程 tap/排除/树重建/背压/生命周期通过，Core Audio process tap + mediaremote-adapter 媒体，媒体与拔插等需播放的项待真机收口，见 PORTING.md §4b/§4c）。
 
 ## 构建与测试
 
@@ -82,12 +82,15 @@ src/
 │   ├── manager.rs          # 会话 actor：生命周期、follow-default、重启退避
 │   ├── session.rs          # 平台无关 DSP worker 线程（补零、频谱、PCM 切块）
 │   ├── linux/              # libpulse threaded mainloop：设备/monitor/按 PID 捕捉
+│   ├── macos/              # Core Audio：进程 tap/聚合设备/IOProc、libproc 进程树
 │   └── windows/            # WASAPI：设备/进程捕捉、dev-mgr 线程、会话枚举
 ├── dsp/                    # 纯函数：Hann+FFT、对数分 band、AGC+噪声门、平滑
 ├── media/linux.rs          # zbus MPRIS worker（信号驱动 + Position 轮询 + 封面缓存）
+├── media/macos.rs          # MediaRemote worker（mediaremote-adapter perl 子进程 + NDJSON）
 ├── media/windows.rs        # SMTC worker 线程（事件脏标记→快照 diff→节流推送）
 └── util/                   # PCM 编码、浮点清洗
 tools/dev-client.mjs        # 调试/验证客户端
+assets/macos/               # mediaremote-adapter 打包资产（媒体功能，随二进制分发）
 bindings/                   # 生成的 TypeScript 协议类型（交给宿主）
 PROTOCOL.md                 # 协议规范
 ```
@@ -106,5 +109,5 @@ PROTOCOL.md                 # 协议规范
 Linux 与 macOS 适配的**目标不变量、实施方案、验收清单与踩坑记录**统一维护在 [PORTING.md](./PORTING.md)——换平台开发时以它为准，防止目标漂移。概要：
 
 - **Linux**：libpulse threaded mainloop（monitor source + `set_monitor_stream` 按应用捕捉）、subscribe 热插拔、zbus MPRIS
-- **macOS**：Core Audio process tap（14.4+，`objc2-core-audio`）、coreaudio 输入、mediaremote-adapter 式 now-playing（best-effort）；TCC 权限挂宿主 .app
+- **macOS**：Core Audio process tap（14.4+，`objc2-core-audio`，设备级/进程/排除三模式）、HAL IOProc 输入采集、mediaremote-adapter 媒体（best-effort）；打包要求见 [docs/PACKAGING-macos.md](./docs/PACKAGING-macos.md)
 - 可选：WebSocket 传输通道（渲染进程直连）、`capture.setSpectrumConfig` 热重配

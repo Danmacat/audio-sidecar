@@ -474,8 +474,9 @@ pub struct Capabilities {
 }
 
 impl Capabilities {
-    /// Used by builds for platforms without an implemented backend.
-    #[cfg_attr(windows, allow(dead_code))]
+    /// Used by builds for platforms without an implemented backend (linux
+    /// spreads it with struct-update syntax; windows/macos set every field).
+    #[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
     pub const NONE: Capabilities = Capabilities {
         device_capture: false,
         device_loopback: false,
