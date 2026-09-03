@@ -190,6 +190,64 @@ M6 全量验收结果（PipeWire 1.6.2 / Pulse API 17.0，2026-07-23）：
 检索关键词：`AudioHardwareCreateProcessTap rust`、`cidre process tap`、`CATapDescription exclude`、
 `macOS now playing API <当前版本号>`、`mediaremote-adapter alternative`。
 
+### 4b. macOS 真机探针结论（2026-09-04，macOS 26.6.2 / arm64，探针代码在 /tmp/macos-spikes）
+
+四项探针全部完成，主选路线全部成立，不启用替代梯队：
+
+- **探针①（tap 路线）通过，采用 `objc2-core-audio` 0.3.2，不启用 cidre/FFI/SCK 替代**：
+  - 绑定完整：`CATapDescription` 全部初始化器（进程 mixdown / 全局排除 / **设备级**
+    `initWithProcesses:andDeviceUID:withStream:` 及其排除变体）、`AudioHardwareCreateProcessTap`、
+  `kAudioHardwarePropertyProcessObjectList` / `TranslatePIDToProcessObject` / 进程属性（PID/BundleID/IsRunning），
+  甚至 macOS 26 新增的 `bundleIDs`（按 bundle ID 匹配进程）与 `processRestoreEnabled`（tap 自动按
+  bundle ID 恢复退出进程）都有绑定。依赖需按 flexaudio-os-macos 的版本钉住：
+  `objc2=0.6.4, objc2-core-audio/-types/-foundation=0.3.2, objc2-foundation=0.3.2, block2=0.6.2`。
+  - 拉流链路无需 AudioUnit/AudioToolbox：tap → 私有聚合设备
+  （`TapList:[{SubTapUID,SubTapDriftCompensation}]` + `TapAutoStart:true`）→
+  `AudioDeviceCreateIOProcIDWithBlock` → IOProc 回调收 interleaved f32。参考实现
+  Studio-Sadola/flexaudio-os-macos（生产形态的 Rust 同类，验证了拆链顺序
+  Stop→DestroyIOProc→DestroyAggregate→DestroyTap 与回调竞态防护）。
+  - 实测数据：tap 格式 48kHz×2ch float；**双进程 440/4000Hz 隔离串扰为 0**（include A 时
+  p440=5999.6 / p4000=0.000000，include B 与 exclude A 对称正确），优于 Linux 探针的 1e-5 量级；
+  设备级 tap（空排除列表 + deviceUID = 该设备全部音频）同样通过。
+  - **关于"优先 OBS 实现方式"的决策**：OBS 的应用音频采集走 ScreenCaptureKit（macOS 13+），但
+  SCK **无法捕指定输出设备**（协议 `device` 源需要），且需要更重的 Screen Recording 权限；OBS
+  分析文档自身（§29–32）也将 CATap 定位为音频专用路线并指出 OBS 选 SCK 是为了统一桌面+音频
+  采集。CATap 在本机四模式全通过且权限更轻，故捕捉引擎采用 CATap（即 §4 原方案），SCK 保持
+  §4a 替代梯队地位不启用。OBS 的成熟经验吸收进实现细节：destroy/recreate 式重建（macOS 26
+  重建仅 ~10ms，见探针③）、错误码映射（权限拒绝 → activationFailed）、`excludesCurrentProcessAudio`
+  对应 tap 场景下 sidecar 自身进程的排除语义。
+  - 进程树边界条件（Safari 主进程 vs WebKit.GPU 子进程 bundle 不同）留 M3 用真实浏览器实测，
+  macOS 26 可用 `bundleIDs` + `processRestoreEnabled` 缓解，14.4–15.x 需自枚举进程树重建。
+
+- **探针②（MediaRemote）通过，采用 mediaremote-adapter（perl 载体）**：
+  - 直接 dlopen 路线**否决**：`/System/Library/PrivateFrameworks/MediaRemote.framework` 在
+  macOS 26.6.2 上 dlopen 成功、符号可见，但 `MRMediaRemoteGetNowPlayingInfo` 的回调**静默不触发**
+  ——15.4 的 com.apple.* bundle ID 限制在 26 仍然生效，且失败无任何错误码。
+  - ungive/mediaremote-adapter（BSD-3）路线有效：`/usr/bin/perl`（注册为 com.apple.perl）加载
+  自建 `MediaRemoteAdapter.framework`，`test` 命令 exit 0（内部是真实的 MediaRemote API 回调
+  往返），`stream` 以 NDJSON 输出 `{"type":"data","diff":...,"payload":{...}}`，`get` 一次性快照。
+  侧车用法：spawn `/usr/bin/perl mediaremote-adapter.pl <framework> stream`，解析 stdout NDJSON；
+  启动时先跑 `test` 探测，失败即 `media_sessions/media_artwork=false`（best-effort 纪律）。
+  打包资产 = `mediaremote-adapter.pl` + 预编译 `MediaRemoteAdapter.framework`（ad-hoc 签名，双架构）。
+  注意 framework 路径必须传**绝对路径**（相对路径 dlopen 失败）；`test` 需要 TestClient 路径作
+  第二个位置参数（无真实播放器时可模拟），生产侧车探测可用 `get`（返回 null=加载成功但无播放，
+  非空=有会话；dlopen 失败会打印 "Failed to load framework" 退出 1）。
+
+- **探针③（重建空隙）通过**：tap+聚合设备完整建/拆周期实测 ~10ms（首次 51ms 冷启动），20 轮
+  min=7/max=51ms，远低于 100ms 门槛。子进程树变化走 manager 重启路径重建 tap 完全可行；
+  macOS 26 上 `processRestoreEnabled` 还可让同 bundle 进程退出/重启自动回归 tap，减少重建频率。
+
+- **探针④（TCC 归属）**：macOS 26 存在 `AudioCapture` TCC 服务（tccutil 可识别重置），但实测
+  从 GUI 应用（本机为 dev.zcode.app）spawn 的**未签名 CLI 子进程创建 process tap 不触发任何
+  弹窗**，`tccutil reset AudioCapture` 后行为不变——tap 创建当前不检查 TCC（或仅对打包 .app
+  生效）。结论：sidecar 以"宿主 spawn 的裸二进制"形态运行时无需权限交互；防御性要求仍写入
+  打包文档：宿主 .app 的 Info.plist 应含 `NSAudioCaptureUsageDescription`（若未来 macOS 收紧，
+  弹窗将归属宿主 .app）。麦克风输入采集（defaultInput）预期走 Microphone TCC，M2 实测补充。
+
+  探针过程的操作痕迹：为验证服务存在执行过 `tccutil reset AudioCapture/ScreenCapture/
+  Microphone/ListenEvent/PostEvent`（清除了全机这些服务的既有授权记录，受影响应用下次使用会
+  重新弹窗）。
+
 ## 5. 验收标准（每个平台完成时必须全过）
 
 自动化（`cargo test` 平台无关部分本来就过，以下是平台实测，参考本仓库 Windows 验证时的探针方法——生成双频正弦 WAV 由两个进程分别循环播放）：
