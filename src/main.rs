@@ -141,7 +141,7 @@ fn platform_capabilities() -> Capabilities {
 #[cfg(target_os = "macos")]
 fn platform_capabilities() -> Capabilities {
     // Milestone state: M1 devices/events + process list, M2 device
-    // loopback/input capture. Process taps (M3) and media (M5) follow.
+    // loopback/input capture, M3 process taps. Media (M5) follows.
     Capabilities {
         audio_process_list: true,
         device_capture: true,
@@ -150,6 +150,8 @@ fn platform_capabilities() -> Capabilities {
         follow_default_input: true,
         follow_default_output: true,
         pcm_stream: true,
+        process_loopback: true,
+        process_loopback_exclude: true,
         spectrum: true,
         ..Capabilities::NONE
     }

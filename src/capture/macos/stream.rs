@@ -895,11 +895,15 @@ fn tree_pids(root: u32, parents: &std::collections::HashMap<u32, u32>) -> Vec<u3
 
 fn current_tree_members(root: u32) -> Vec<AudioObjectID> {
     let parents = parent_map();
-    tree_pids(root, &parents)
+    // Sorted: membership comparison must not depend on the (random) HashMap
+    // iteration order the tree walk produces.
+    let mut members: Vec<AudioObjectID> = tree_pids(root, &parents)
         .into_iter()
         .filter(|pid| process_alive(*pid))
         .filter_map(|pid| pid_to_object(pid).ok().filter(|o| *o != 0))
-        .collect()
+        .collect();
+    members.sort_unstable();
+    members
 }
 
 /// Ok(Some(members)) when membership differs from `previous`.
