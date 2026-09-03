@@ -62,7 +62,6 @@ enum HalEvent {
     DevicesChanged,
     DefaultOutputChanged,
     DefaultInputChanged,
-    DefaultSystemChanged,
 }
 
 #[derive(Clone)]
@@ -183,9 +182,7 @@ fn thread_main(
                     HalEvent::DevicesChanged => {
                         refresh_snapshot(&mut snapshot, &mut pending, &events, &manager)
                     }
-                    HalEvent::DefaultOutputChanged
-                    | HalEvent::DefaultInputChanged
-                    | HalEvent::DefaultSystemChanged => {
+                    HalEvent::DefaultOutputChanged | HalEvent::DefaultInputChanged => {
                         refresh_defaults(&mut snapshot, &mut pending)
                     }
                 }
@@ -214,6 +211,7 @@ unsafe fn install_listeners(
         let event = if selector == SELECTOR_DEVICES {
             HalEvent::DevicesChanged
         } else if selector == SELECTOR_DEFAULT_OUTPUT || selector == SELECTOR_DEFAULT_SYSTEM {
+            // System default feeds the same debounced render path.
             HalEvent::DefaultOutputChanged
         } else if selector == SELECTOR_DEFAULT_INPUT {
             HalEvent::DefaultInputChanged
@@ -429,11 +427,6 @@ fn wire_id(uid: &str, kind: DeviceKind) -> String {
     }
 }
 
-fn strip_wire_id(wire: &str) -> &str {
-    wire.trim_start_matches("ca:out:")
-        .trim_start_matches("ca:in:")
-}
-
 fn device_name(id: AudioObjectID) -> String {
     unsafe { get_cfstring(id, SELECTOR_NAME, hal::scope_global()).unwrap_or_default() }
         .trim()
@@ -606,21 +599,4 @@ fn list_audio_processes() -> Result<Vec<AudioProcessInfo>, RpcError> {
 
 fn os_error(reason: String) -> RpcError {
     RpcError::new(ErrorCode::OsError, reason)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::strip_wire_id;
-
-    #[test]
-    fn wire_id_round_trip() {
-        assert_eq!(
-            strip_wire_id("ca:out:BuiltInSpeakerDevice"),
-            "BuiltInSpeakerDevice"
-        );
-        assert_eq!(
-            strip_wire_id("ca:in:AppleHDAEngineInput"),
-            "AppleHDAEngineInput"
-        );
-    }
 }

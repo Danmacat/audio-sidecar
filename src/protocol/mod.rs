@@ -87,6 +87,7 @@ impl RpcError {
         }
     }
 
+    #[cfg_attr(target_os = "macos", allow(dead_code))] // used by win/linux media backends
     pub fn with_data(mut self, data: Value) -> Self {
         self.data = Some(data);
         self

@@ -164,7 +164,7 @@ pub trait CaptureBackend: Send + Sync + 'static {
 }
 
 /// Backend for platforms whose capture support is not implemented yet.
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 pub struct StubBackend;
 
 impl CaptureBackend for StubBackend {

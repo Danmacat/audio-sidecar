@@ -350,5 +350,3 @@ pub(crate) const SELECTOR_PROCESS_DEVICES: AudioObjectPropertySelector =
     objc2_core_audio::kAudioProcessPropertyDevices;
 pub(crate) const SELECTOR_PROCESS_RUNNING_OUTPUT: AudioObjectPropertySelector =
     objc2_core_audio::kAudioProcessPropertyIsRunningOutput;
-pub(crate) const SELECTOR_PROCESS_RUNNING_INPUT: AudioObjectPropertySelector =
-    objc2_core_audio::kAudioProcessPropertyIsRunningInput;

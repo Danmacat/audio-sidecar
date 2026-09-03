@@ -187,7 +187,7 @@ impl Slot {
 }
 
 /// Used by platforms without a device watcher (the stub backends).
-#[cfg_attr(windows, allow(dead_code))]
+#[cfg_attr(any(windows, target_os = "macos"), allow(dead_code))]
 pub fn spawn(
     backend: Arc<dyn CaptureBackend>,
     resolver: Option<Arc<dyn DeviceService>>,
