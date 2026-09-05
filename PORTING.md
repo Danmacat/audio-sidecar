@@ -318,6 +318,31 @@ pid@12/ppid@16 偏移来自 SDK 头文件，非猜测）。
   同量级；比 Windows 慢的部分是 tap 管线排空残余样本（真实音频，平台层不得丢弃——WASAPI
   loopback 无声时不投包故 Windows 更快）。衰减动画观感一致。
 
+### 4d. ScreenCaptureKit 进程引擎（A/B 可选，2026-09-05）
+
+应用户要求补充了与 OBS Studio 完全同款的 SCK 进程捕捉引擎（`capture/macos/sck.rs`），
+作为 CATap 的 A/B 选项：环境变量 `AUDIO_SIDECAR_PROCESS_ENGINE=sck` 时
+`process`/`systemExcludingProcess` 源走 SCK，**默认仍为 CATap**；设备 loopback 恒走
+CATap（SCK 无设备级能力）。链路照抄 OBS：`SCShareableContent` → `SCRunningApplication`
+（按 pid 进程树解析）→ `SCContentFilter(including/excludingApplications:exceptingWindows:)`
+→ `SCStreamConfiguration`（capturesAudio、excludesCurrentProcessAudio、channelCount=2、
+queueDepth=8；采样率不设，从首帧 ASBD 读）→ `SCStream` + **dummy screen output**
+（OBS 的"静默 SCK 错误"技巧）→ `CMSampleBuffer`（float 标志校验 + planar→interleaved）。
+
+真机对比实测（macOS 26.6.2，Music+Safari 双 GUI 应用双频）：
+
+- **Safari 主进程 pid 捕捉：SCK 强项**——按 GUI 应用聚合，能捕到 WebKit.GPU 渲染的网页
+  音频（band28=0.985），这是 CATap 的 pid 树语义做不到的路径；Music(440) b28=0.955/b50=0.000、
+  Safari(4000) b28=0.000/b50=0.985、排除 Music 对称正确——隔离与 CATap 同级（零串扰）。
+- 静音衰减 633ms（SIGSTOP 后 peak<0.01）；SIGKILL 后 ~0.4s `failed:processExited`
+  （io 循环轮询根 pid 存活，SCK 自身不因目标退出而报错）。
+- **SCK 的代价**：①需要 Screen Recording TCC 授权（首次触发弹窗归属宿主 .app，本机
+  ZCode 授权后生效；未授权时 `activationFailed` 且透传中文 TCC 消息）；②**只能捕 GUI
+  应用**——`afplay` 等无窗口 CLI 进程没有 `SCRunningApplication` 条目，如实报
+  activationFailed；③引擎切换仅影响进程类源，协议无变化。
+- 实现备注：`define_class!`（objc2 0.6 语法）实现 `SCStreamOutput` 协议；修复过
+  `RefCell` 双借用 panic（if-let 临时守卫存活期间 `borrow_mut`）。
+
 仍待手动/长期观察项：
 
 - 被捕捉 USB/蓝牙设备物理拔插 → `restarting(deviceRemoved)` 循环与插回自动恢复（机制与默认

@@ -81,7 +81,7 @@ fn io_main(
     let capture_id = spec.capture_id.clone();
     let ready_cell = std::sync::Mutex::new(Some(ready));
     let result = std::panic::catch_unwind(AssertUnwindSafe(|| {
-        run_io(&spec, &stats, &ready_cell, &stop, setup_tx);
+        run_io(&spec, &stats, &ready_cell, &stop, &manager, setup_tx);
     }));
     if let Err(payload) = result {
         let message = panic_message(&payload);
@@ -104,11 +104,13 @@ fn panic_message(payload: &Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_io(
     spec: &CaptureSpec,
     stats: &Arc<SessionStats>,
     ready_cell: &std::sync::Mutex<Option<oneshot::Sender<Result<ReadyInfo, SessionError>>>>,
     stop: &AtomicBool,
+    manager: &mpsc::UnboundedSender<ManagerCmd>,
     setup_tx: StdSender<WorkerSetup>,
 ) {
     let send_ready = |result| {
@@ -221,9 +223,9 @@ fn run_io(
             SCStreamOutputType::Audio,
             None,
         ) {
+            let message = err.localizedDescription();
             send_ready(Err(SessionError::Activation(format!(
-                "addStreamOutput(audio): {}",
-                err.localizedDescription().to_string()
+                "addStreamOutput(audio): {message}"
             ))));
             return;
         }
@@ -285,6 +287,15 @@ fn run_io(
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
+        // A dead root pid is fatal (host decides); SCK itself keeps the
+        // stream alive otherwise.
+        if !process_alive(pid) {
+            let _ = manager.send(ManagerCmd::Fatal {
+                capture_id: spec.capture_id.clone(),
+                error: SessionError::ProcessExited,
+            });
+            break;
+        }
     }
     stopped.store(true, Ordering::Release);
     let _ = wait_block("stopCapture", |done| unsafe {
@@ -318,7 +329,7 @@ fn wait_block(
     match rx.recv_timeout(START_TIMEOUT) {
         Ok(None) => Ok(()),
         Ok(Some(error)) => {
-            let message = error.localizedDescription().to_string();
+            let message = error.localizedDescription();
             Err(format!("{ctx}: {message}"))
         }
         Err(_) => Err(format!("{ctx}: timed out")),
@@ -431,13 +442,13 @@ impl SckOutput {
             let Some(asbd) = asbd else {
                 return;
             };
-            if let Some(tx) = self.ivars().format_tx.borrow().as_ref() {
-                if asbd.mSampleRate > 0.0 && asbd.mChannelsPerFrame > 0 {
+            if asbd.mSampleRate > 0.0 && asbd.mChannelsPerFrame > 0 {
+                // Single mutable borrow: report once, then clear the sender.
+                if let Some(tx) = self.ivars().format_tx.borrow_mut().take() {
                     let _ = tx.send(AudioFormat {
                         sample_rate: asbd.mSampleRate as u32,
                         channels: asbd.mChannelsPerFrame.clamp(1, u8::MAX as u32) as u16,
                     });
-                    self.ivars().format_tx.borrow_mut().take();
                 }
             }
             let Some(data) = buffer.data_buffer() else {
@@ -484,7 +495,7 @@ unsafe fn push_samples(
     let interleaved =
         asbd.mFormatFlags & objc2_core_audio_types::kAudioFormatFlagIsNonInterleaved == 0;
     let sample_count = bytes.len() / std::mem::size_of::<f32>();
-    let data = std::slice::from_raw_parts(bytes.as_ptr() as *const f32, sample_count);
+    let data = unsafe { std::slice::from_raw_parts(bytes.as_ptr() as *const f32, sample_count) };
     let mut overflow = 0u64;
     if interleaved || channels == 1 {
         for &sample in data {
