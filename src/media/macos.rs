@@ -277,6 +277,7 @@ struct WorkerState {
     announced_snapshot: bool,
 }
 
+#[derive(Clone)]
 struct CachedArtwork {
     file: String,
     hash: String,
@@ -318,9 +319,11 @@ impl WorkerState {
                     self.stream_rx = None;
                 }
                 Err(_) => {
-                    // Idle tick: release a timeline update parked by the
-                    // throttle once its deadline passes.
+                    // Idle tick: release a throttled timeline update, and
+                    // extrapolate progress while playing (MediaRemote pushes
+                    // no periodic updates; the frame carries its timestamp).
                     self.flush_pending_timeline();
+                    self.tick_extrapolated_timeline();
                 }
             }
         }
@@ -811,6 +814,40 @@ impl WorkerState {
         });
     }
 
+    /// While playing, advance the timeline locally:
+    /// `position = elapsed + (now - frameTimestamp) * rate`. Emitted through
+    /// the same ≤2/s throttle as pushed updates.
+    fn tick_extrapolated_timeline(&mut self) {
+        const TICK: i64 = 500; // ms of movement worth reporting
+        let Some(tracked) = self.tracked.as_mut() else {
+            return;
+        };
+        if tracked.session.playback_status != PlaybackStatus::Playing {
+            return;
+        }
+        let num = |key: &str| self.payload.get(key).and_then(|v| v.as_f64());
+        let (Some(elapsed_us), Some(timestamp_us)) =
+            (num("elapsedTimeMicros"), num("timestampEpochMicros"))
+        else {
+            return;
+        };
+        let rate = num("playbackRate").unwrap_or(1.0);
+        if rate <= 0.0 {
+            return;
+        }
+        let now_us = (now_ms() as f64) * 1000.0;
+        let position_ms = ((elapsed_us / 1000.0) + (now_us - timestamp_us) / 1000.0 * rate) as i64;
+        let Some(timeline) = tracked.session.timeline.as_mut() else {
+            return;
+        };
+        if (position_ms - timeline.position_ms).abs() < TICK {
+            return;
+        }
+        timeline.position_ms = position_ms.max(0);
+        timeline.last_updated_at_ms = now_ms() as i64;
+        self.emit_session_updated(vec![MediaChangeKind::Timeline]);
+    }
+
     fn flush_pending_timeline(&mut self) {
         let Some(deadline) = self.pending_timeline else {
             return;
@@ -884,9 +921,19 @@ fn build_session(
                 vec![genre]
             }
         },
-        playback_type: match payload.get("mediaType").and_then(|v| v.as_i64()) {
-            Some(1) => PlaybackType::Music, // MRMediaTypeAudio
-            Some(2) | Some(3) | Some(4) => PlaybackType::Video,
+        playback_type: match payload
+            .get("mediaType")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default()
+        {
+            name if name.ends_with("Music") || name.ends_with("Audio") => PlaybackType::Music,
+            name if name.ends_with("Video")
+                || name.ends_with("Movie")
+                || name.ends_with("TVShow")
+                || name.ends_with("VideoPodcast") =>
+            {
+                PlaybackType::Video
+            }
             _ => PlaybackType::Unknown,
         },
         playback_status: if playing {
@@ -1054,5 +1101,139 @@ mod tests {
             sniff_content_type("", &[0x89, b'P', b'N', b'G']),
             "image/png"
         );
+    }
+
+    fn test_worker(artwork_dir: Option<PathBuf>) -> (WorkerState, std::sync::mpsc::Receiver<Msg>) {
+        // The stdout writer is a tokio task; give the test a private runtime
+        // (leaked — dropping it would cancel the task mid-test).
+        let runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("test runtime"),
+        ));
+        let (events, _join) = runtime.block_on(async { crate::rpc::writer::spawn(64) });
+        let (tx, rx) = std::sync::mpsc::channel::<Msg>();
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let worker = WorkerState {
+            script: PathBuf::from("/nonexistent"),
+            framework: PathBuf::from("/nonexistent"),
+            cmd_tx: tx.clone(),
+            shutdown,
+            events,
+            artwork_dir,
+            tracked: None,
+            payload: serde_json::Map::new(),
+            stream: None,
+            stream_rx: None,
+            restart_backoff: STREAM_RESTART_MIN,
+            last_timeline_emit: None,
+            pending_timeline: None,
+            artwork_gen: 0,
+            announced_snapshot: false,
+        };
+        (worker, rx)
+    }
+
+    const PNG_BYTES: &[u8] = &[
+        0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0x0d, b'I', b'H', b'D', b'R',
+    ];
+
+    #[test]
+    fn full_frame_with_artwork_tracks_and_caches() {
+        let dir = std::env::temp_dir().join(format!("sidecar-art-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (mut worker, rx) = test_worker(Some(dir.clone()));
+        let artwork = B64.encode(PNG_BYTES);
+        let frame = serde_json::json!({
+            "type": "data", "diff": false,
+            "payload": {
+                "bundleIdentifier": "com.example.player",
+                "title": "song",
+                "playing": true,
+                "playbackRate": 1.0,
+                "elapsedTimeMicros": 10_000.0,
+                "durationMicros": 60_000_000.0,
+                "mediaType": "MRMediaRemoteMediaTypeMusic",
+                "artworkData": artwork,
+                "artworkMimeType": "image/png",
+            }
+        });
+        worker.handle_line(frame.to_string());
+        let tracked = worker.tracked.as_ref().expect("session tracked");
+        assert_eq!(tracked.session.title, "song");
+        assert_eq!(tracked.session.playback_type, PlaybackType::Music);
+        assert!(tracked.session.artwork_available);
+        // Drain the artwork result posted by the cache thread.
+        let cached = loop {
+            match rx.recv_timeout(Duration::from_secs(2)).unwrap() {
+                Msg::Cmd(MediaCmd::ArtworkCached {
+                    session_id,
+                    generation,
+                    hash,
+                    result,
+                }) => {
+                    worker.apply_artwork(&session_id, generation, &hash, result.clone());
+                    if let Ok(c) = &result {
+                        break c.clone();
+                    }
+                    panic!("artwork cache failed");
+                }
+                Msg::Cmd(MediaCmd::Quit) => panic!("unexpected quit"),
+                _ => continue,
+            }
+        };
+        let tracked = worker.tracked.as_ref().expect("session tracked");
+        assert_eq!(tracked.artwork_hash.as_deref(), Some(cached.hash.as_str()));
+        assert_eq!(tracked.session.artwork_file, Some(cached.file.clone()));
+        assert!(
+            cached.file.ends_with(".png"),
+            "sniffed extension: {}",
+            cached.file
+        );
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_payload_drops_session() {
+        let (mut worker, _rx) = test_worker(None);
+        worker.handle_line(
+            serde_json::json!({"type":"data","diff":false,"payload":{
+                "bundleIdentifier":"com.example.player","title":"song"}})
+            .to_string(),
+        );
+        assert!(worker.tracked.is_some());
+        worker
+            .handle_line(serde_json::json!({"type":"data","diff":false,"payload":{}}).to_string());
+        assert!(worker.tracked.is_none());
+    }
+
+    #[test]
+    fn timeline_extrapolation_advances_position() {
+        let (mut worker, _rx) = test_worker(None);
+        // elapsed=10s, frame timestamp=2s ago, rate 1 -> position ~12s
+        let now_us = (crate::util::now_ms() as f64) * 1000.0;
+        worker.handle_line(
+            serde_json::json!({"type":"data","diff":false,"payload":{
+                "bundleIdentifier":"com.example.player","title":"song","playing":true,
+                "playbackRate":1.0,
+                "elapsedTimeMicros": 10_000_000.0,
+                "timestampEpochMicros": now_us - 2_000_000.0,
+                "durationMicros": 60_000_000.0}})
+            .to_string(),
+        );
+        worker.last_timeline_emit = None; // skip the initial emit's throttle
+        worker.tick_extrapolated_timeline();
+        let position = worker
+            .tracked
+            .as_ref()
+            .unwrap()
+            .session
+            .timeline
+            .as_ref()
+            .unwrap()
+            .position_ms;
+        assert!((11_500..=13_000).contains(&position), "position {position}");
     }
 }

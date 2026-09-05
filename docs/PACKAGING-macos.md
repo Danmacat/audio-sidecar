@@ -79,4 +79,9 @@ sidecar 运行时按以下顺序查找（首个命中生效）：
 - 进程树新子进程加入捕捉需要重建 tap（实测空隙 ~230ms，含 200ms 退避）；macOS 26
   起 tap 启用 `processRestoreEnabled` 减少同 bundle 进程退出/重启造成的重建。
 - 媒体是单一 now-playing 模型：会话列表最多 1 个（当前播放应用），无 SMTC 的多
-  会话概念；封面直接来自 now-playing 数据（无 `artworkUrl` 字段，恒 null）。
+  会话概念；封面直接来自 now-playing 数据（无 `artworkUrl` 字段，恒 null）；播放中
+  MediaRemote 不推周期进度，sidecar 按帧时间戳本地外推（≤2 次/秒）。
+- **Safari 等 XPC 架构应用的进程树**：WebKit 渲染进程（com.apple.WebKit.GPU）的父进程是
+  launchd，捕 Safari 主进程 pid 捕不到网页音频（会进入无声 running 等待）。宿主选择器请
+  用 `processes.listAudio` 返回的**实际发声 pid**（该列表能直接看到 WebKit.GPU 及其
+  bundle ID）——Chrome/Electron 等应用不受影响（renderer 是真子进程）。

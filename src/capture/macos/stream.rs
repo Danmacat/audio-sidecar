@@ -441,11 +441,14 @@ fn build_tap(
     stats: &Arc<SessionStats>,
 ) -> Result<(CaptureChain, AudioFormat, rtrb::Consumer<f32>), SessionError> {
     let mut members = Vec::new();
-    if let TapKind::ProcessTree { pid, exclude } = &kind {
-        members = current_tree_members(*pid);
-        if !*exclude && members.is_empty() {
+    if let TapKind::ProcessTree { pid, .. } = &kind {
+        if !process_alive(*pid) {
             return Err(SessionError::ProcessExited);
         }
+        // An empty set is fine: the tap starts silent and the io-loop's tree
+        // watch rebuilds once the target (or a child) connects to Core Audio
+        // — the same "wait for the target to make sound" semantics Linux has.
+        members = current_tree_members(*pid);
     }
     let desc: Retained<CATapDescription> = unsafe {
         let d = match kind {

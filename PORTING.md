@@ -291,15 +291,38 @@ pid@12/ppid@16 偏移来自 SDK 头文件，非猜测）。
   deviceNotFound / processNotFound 全部正确；`--capture` 双路启动（15fps/32band 与默认）
   配置回显与 Linux 一致。
 
-待真机播放验证项（环境暂不便播放音频，等所有者确认后执行）：
+真机播放验证结果（2026-09-05 补充，M5/M6 收口）：
 
-- 真实播放器（Music/网易云）的会话快照/元数据（含 CJK）/播放暂停事件/timeline 节流实测；
-  封面落盘（`changed=["artwork"]` 事件 + 哈希命名）与 `media.getArtwork` base64/writeTo。
-- Safari 主进程 pid 捕捉是否覆盖 WebKit.GPU 子进程音频（树枚举已按 pid 关系覆盖，实测留
-  真机；macOS 26 的 `bundleIDs`/`processRestoreEnabled` 未启用按 bundle 匹配，保持树语义）。
-- 被捕捉 USB/蓝牙设备物理拔插 → `restarting(deviceRemoved)` 循环与插回自动恢复；无线耳机
-  首次激活唤醒（激活重试梯已就位，实测留真机）。
-- §5 全量清单的统一复测（M6 收口）。
+- **媒体（Music.app 播放本地文件实测）**：会话出现/切歌/播放状态事件全部正确
+  （`sessionsChanged` 快照 + `mediaProperties,playbackInfo` 分类）；**MediaRemote 播放中不推
+  周期进度**（实测 30s 播放 0 条进度 diff），worker 按帧内时间戳本地外推
+  （`position = elapsed + (now - timestamp) × rate`），20s 实测 40 条 timeline 事件、最小
+  间隔 502ms（≤2/s）；`mediaType` 为**字符串**（`MRMediaRemoteMediaTypeMusic`）而非数字，
+  按后缀映射 Music/Video。封面：mediaremoted 对 Music 临时打开的文件**不提供 artworkData**
+  （上游行为，与 m4a 是否内嵌封面无关）；封面管线（base64→魔数嗅探→哈希落盘→
+  `changed=["artwork"]`→去重）由单测端到端覆盖（`media::macos::tests`，含 16 字节 PNG 嗅探
+  出 .png 与内容寻址去重）。真实流媒体封面上线后可再观察。
+- **Safari 子进程树——macOS 的 XPC 例外（重要事实）**：WebKit.GPU 渲染进程的 **ppid=1
+  （launchd）**，Safari 主进程的 pid 父子树**枚举不到它**；实测 `bundleIDs=["com.apple.Safari",
+  "com.apple.WebKit.GPU"]` 的 tap 也不投样本（该属性未文档化，不深挖）。**协议推荐路径完全
+  工作并已实测**：`processes.listAudio` 给出发声 pid（WebKit.GPU，带 bundle 标识），直接捕
+  该 pid 实测 p440=5999.5 零串扰。Chrome/Electron 等应用 renderer 是真子进程，pid 树语义
+  正常；Safari 类 XPC 架构请宿主用发声 pid（PROTOCOL.md §5 本就推荐）。
+- **"等待发声"语义修正**：目标进程存活但尚未连接 Core Audio（无进程对象）时，原实现误报
+  `processExited`；已改为建立空成员 tap 进入 running（无声），由树监控在目标/子进程连上音频
+  后自动重建挂入——与 Linux 的 target_loss 等待语义一致。Safari 主 pid 现在正确 running
+  （静默等待）而非报错。
+- **PCM 数学精确复测**：连续流中任意 60 块恰好 576,000 字节（48000×2ch×s16le×3s）、
+  `firstSampleIndex` 跨度精确 141,600（59×2400）、无钟漂。
+- **静音衰减复测**：SIGSTOP 暂停播放后 744ms 峰值 <0.01（rms=0.0000）。与 Linux（~1s 归零）
+  同量级；比 Windows 慢的部分是 tap 管线排空残余样本（真实音频，平台层不得丢弃——WASAPI
+  loopback 无声时不投包故 Windows 更快）。衰减动画观感一致。
+
+仍待手动/长期观察项：
+
+- 被捕捉 USB/蓝牙设备物理拔插 → `restarting(deviceRemoved)` 循环与插回自动恢复（机制与默认
+  切换同源已验证，物理拔插留手动）；无线耳机首次激活唤醒（激活重试梯已就位）。
+- 真实流媒体（Apple Music/网易云在线曲库）的封面与 CJK 元数据长跑观察。
 
 ## 5. 验收标准（每个平台完成时必须全过）
 
