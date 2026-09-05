@@ -3,6 +3,7 @@
 
 pub mod devices;
 pub mod hal;
+pub(crate) mod sck;
 pub(crate) mod stream;
 
 use crate::protocol::RpcError;

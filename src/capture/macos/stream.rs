@@ -76,6 +76,14 @@ struct ActiveCapture {
 }
 
 pub fn spawn(spec: CaptureSpec, wiring: SessionWiring) -> Result<SessionThreads, RpcError> {
+    // A/B switch: process sources can ride the OBS-style ScreenCaptureKit
+    // engine (`AUDIO_SIDECAR_PROCESS_ENGINE=sck`). Device captures always
+    // use the Core Audio tap engine.
+    if matches!(spec.source, ResolvedSource::Process { .. })
+        && std::env::var("AUDIO_SIDECAR_PROCESS_ENGINE").as_deref() == Ok("sck")
+    {
+        return super::sck::spawn(spec, wiring);
+    }
     let (setup_tx, setup_rx) = std::sync::mpsc::channel::<WorkerSetup>();
     let worker = session::spawn_worker(
         spec.capture_id.clone(),
@@ -808,7 +816,7 @@ const PROC_PIDTBSDINFO_SIZE: i32 = std::mem::size_of::<[u32; 34]>() as i32;
 const PBI_PID_OFF: usize = 12;
 const PBI_PPID_OFF: usize = 16;
 
-fn process_alive(pid: u32) -> bool {
+pub(crate) fn process_alive(pid: u32) -> bool {
     let result = unsafe { kill(pid as i32, 0) };
     result == 0 || std::io::Error::last_os_error().raw_os_error() == Some(1) // EPERM: exists
 }
@@ -882,6 +890,10 @@ fn parent_map() -> std::collections::HashMap<u32, u32> {
         }
     }
     map
+}
+
+pub(crate) fn tree_pids_of(root: u32) -> Vec<u32> {
+    tree_pids(root, &parent_map())
 }
 
 fn tree_pids(root: u32, parents: &std::collections::HashMap<u32, u32>) -> Vec<u32> {

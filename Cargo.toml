@@ -66,6 +66,13 @@ objc2-foundation = { version = "=0.3.2", features = [
     "NSUUID",
     "NSValue",
 ] }
+objc2-screen-capture-kit = "=0.3.2"
+objc2-core-media = { version = "=0.3.2", features = [
+    "CMBase",
+    "CMBlockBuffer",
+    "CMFormatDescription",
+    "CMSampleBuffer",
+] }
 
 [dev-dependencies]
 approx = "0.5"
