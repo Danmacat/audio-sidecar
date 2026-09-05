@@ -69,7 +69,16 @@ fn copy_tree(src: &Path, dst: &Path) -> std::io::Result<()> {
                 if to.symlink_metadata().is_ok() {
                     std::fs::remove_file(&to)?;
                 }
-                std::os::unix::fs::symlink(&target, &to)?;
+                // The staging pass only runs for macOS targets, but this
+                // script must still compile on non-unix hosts.
+                #[cfg(unix)]
+                {
+                    std::os::unix::fs::symlink(&target, &to)?;
+                }
+                #[cfg(not(unix))]
+                {
+                    let _ = &target;
+                }
             }
             Staged::Dir(from) => {
                 let name = from.file_name().expect("entry name");
