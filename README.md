@@ -21,6 +21,8 @@ cargo test --features ts-export   # 同时重新生成 bindings/*.ts
 cargo clippy --all-targets -- -D warnings
 ```
 
+CI 分两条独立流水线：[ci.yml](./.github/workflows/ci.yml) 每次 push/PR 只做 build+test；[release.yml](./.github/workflows/release.yml) 负责二进制产物——push master 或手动触发（workflow_dispatch，可选任意分支）时构建三平台 release 二进制并上传为 workflow Artifacts（`linux-x64` / `windows-x64` / `macos-arm64`，macOS 包内含 `mediaremote-adapter/` 资产目录），打 `v*` tag 时自动创建 GitHub Release 并附上三平台压缩包。两条流水线并行互不阻塞。
+
 ## 快速验证（tools/dev-client.mjs，零依赖 Node ≥18）
 
 ```sh

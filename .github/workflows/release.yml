@@ -1,0 +1,72 @@
+name: release
+
+# 二进制产物流水线，与 build-and-test（ci.yml）相互独立、并行运行：
+# - push master：构建 release 二进制并上传为 Artifacts（跳过发布）
+# - 手动触发（workflow_dispatch）：任意分支按需出二进制，同样只传 Artifacts
+# - push v* tag：构建 + 上传 Artifacts + 创建 GitHub Release
+on:
+  push:
+    branches: [master]
+    tags: ['v*']
+  workflow_dispatch:
+
+jobs:
+  binaries:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux-x64
+          - os: windows-latest
+            platform: windows-x64
+          - os: macos-latest
+            platform: macos-arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux PulseAudio headers
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes libpulse-dev
+      - run: cargo build --release --locked
+      # tar 保留可执行位/符号链接（macOS framework 依赖符号链接），所以
+      # unix 走 tar.gz 而不是直接上传 target/release 下的文件。
+      - name: Package binary (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/audio-sidecar-${{ matrix.platform }}.tar.gz" -C target/release audio-sidecar
+      # macOS 二进制必须与 mediaremote-adapter/ 同目录分发（媒体功能，
+      # 见 docs/PACKAGING-macos.md §1）；build.rs 已把它复制到 target/release。
+      - name: Package binary (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p dist
+          tar -czf "dist/audio-sidecar-${{ matrix.platform }}.tar.gz" -C target/release audio-sidecar mediaremote-adapter
+      - name: Package binary (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Compress-Archive -Path target/release/audio-sidecar.exe -DestinationPath "dist/audio-sidecar-${{ matrix.platform }}.zip"
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: audio-sidecar-${{ matrix.platform }}
+          path: dist/
+          if-no-files-found: error
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: binaries
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
