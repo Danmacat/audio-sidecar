@@ -3,7 +3,7 @@ name = "audio-sidecar"
 version = "0.1.0"
 edition = "2024"
 rust-version = "1.85"
-description = "Audio capture + spectrum + media session sidecar for danmacat-desktop"
+description = "Cross-platform audio capture, spectrum and media session sidecar speaking stdio NDJSON"
 license = "MIT"
 
 [features]

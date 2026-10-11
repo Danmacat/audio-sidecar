@@ -1,5 +1,5 @@
 //! macOS capture backend built on the Core Audio process-tap API
-//! (macOS 14.4+; see PORTING.md §4/§4b for the probe record).
+//! (macOS 14.4+).
 
 pub mod devices;
 pub mod hal;

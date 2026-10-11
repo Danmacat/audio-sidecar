@@ -141,8 +141,8 @@ fn platform_capabilities() -> Capabilities {
 #[cfg(target_os = "macos")]
 fn platform_capabilities() -> Capabilities {
     // Media is best-effort: it needs the mediaremote-adapter packaging
-    // assets (PORTING.md §4b probe #2) and can be broken by any macOS
-    // update; capture never depends on it.
+    // assets and can be broken by any macOS update; capture never depends
+    // on it.
     let media = media::macos::adapter_assets_available();
     Capabilities {
         audio_process_list: true,

@@ -1,6 +1,6 @@
 # macOS 打包指南（audio-sidecar）
 
-面向把 audio-sidecar 打进宿主 Electron 应用（danmacat-desktop）的打包场景。
+面向把 audio-sidecar 打进宿主应用（如 Electron 应用）的打包场景。
 Windows/Linux 打包不受本文影响。
 
 ## 1. 二进制与资产布局
@@ -23,7 +23,7 @@ sidecar 运行时按以下顺序查找（首个命中生效）：
 3. `<sidecar 二进制目录>/`（平铺）
 
 资产缺失时 `hello.capabilities.mediaSessions/mediaArtwork = false`，媒体 RPC 返回
-`osError`，捕捉功能完全不受影响（best-effort 纪律，PORTING.md §4）。
+`osError`，捕捉功能完全不受影响（best-effort 纪律）。
 
 开发态无需手工摆放：`cargo build` 在 macOS 上自动把
 `assets/macos/mediaremote-adapter/` 复制到 `target/<profile>/mediaremote-adapter/`
@@ -37,12 +37,12 @@ sidecar 运行时按以下顺序查找（首个命中生效）：
   13.x 报 `unsupported`，在宿主侧按 `hello.osVersion` 前缀判断（"13."）后不发起
   对应 `capture.start`，或等待后续版本把 capability 探测内置到启动时。
 - **媒体（MediaRemote）**：无版本门槛，但 15.4+ 必须走 mediaremote-adapter 资产
-  （Apple 限制直接加载，PORTING.md §4b 探针②）。
+  （Apple 限制第三方进程直接加载）。
 - 其余能力（设备枚举/事件、输入采集、频谱、PCM）无门槛。
 
 ## 3. TCC 权限与 Info.plist
 
-实测（macOS 26.6.2，2026-09-04，PORTING.md §4b 探针④）：从 GUI 应用 spawn 的
+实测（macOS 26.6.2，2026-09-04）：从 GUI 应用 spawn 的
 **未签名 CLI 子进程**创建 Core Audio process tap **不触发 TCC 弹窗**，`AudioCapture`
 服务重置后行为不变。即当前形态下用户无感知。
 

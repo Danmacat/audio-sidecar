@@ -1,6 +1,6 @@
 # audio-sidecar 协议规范（protocolVersion = 1）
 
-与主进程（Electron/Node）的协商接口。类型定义的机器可读版本在 [`bindings/`](./bindings)（由 Rust 源码经 ts-rs 生成，`cargo test --features ts-export` 重新生成），本文档描述类型之外的语义：帧格式、顺序保证、背压、生命周期。
+宿主进程与 sidecar 的协商接口。宿主可以是任何能 spawn 子进程并读写管道的语言（本文示例使用 Node，仅作示范）。类型定义的机器可读版本在 [`bindings/`](./bindings)（由 Rust 源码经 ts-rs 生成，`cargo test --features ts-export` 重新生成），本文档描述类型之外的语义：帧格式、顺序保证、背压、生命周期。
 
 ## 1. 传输与帧格式
 
@@ -22,7 +22,7 @@
 
 ## 2. 生命周期
 
-- 宿主 `spawn(audio-sidecar.exe)`，建议参数：`--log-level info`（或 `--log-file <path>`）。
+- 宿主 `spawn(audio-sidecar)`，建议参数：`--log-level info`（或 `--log-file <path>`）。
 - 可选启动参数：
   - `--capture <json>`（可重复）：启动即发起捕捉的语法糖，值为 `CaptureSource`（如 `{"type":"defaultOutput"}`）或完整 `CaptureStartParams`（含 spectrum/pcm 配置）。等价于宿主发 `capture.start`，captureId 通过 `capture.state` 事件与 `capture.list` 获知；单条失败只记日志不致命。
   - `--artwork-dir [<path>]`：开启封面落盘（见 §4a）。带路径 = 宿主指定目录（sidecar 绝不清理）；**不带值** = 使用 `<系统临时目录>/audio-sidecar-artwork`（sidecar 托管：启动时清理 30 天未触碰的缓存与残留临时文件）；不传该 flag = 不落盘。实际生效目录通过 `hello.artworkDir` 回传（未开启为 `null`）。
@@ -49,7 +49,7 @@
 | `media.getArtwork` | `{sessionId, maxBytes? = 2000000, writeTo?}` → 默认 `{contentType, byteLength, dataBase64}`；传 `writeTo`（**目录**路径）则改为写文件并返回 `{contentType, byteLength, file, hash}`（无 base64）——命名/原子写/去重与 §4a 同一套机制，与 `--artwork-dir` 指向同目录时共享缓存（文件已存在则秒回）。3s 超时；空流自动重试一次（部分应用切歌后封面晚到）。错误：`sessionNotFound` / `artworkUnavailable` / `artworkTooLarge`（`data.byteLength` 告知实际大小）。 |
 | `shutdown` | 优雅退出。 |
 
-**capabilities**（Windows 全量为 true；`processLoopback*` 需 Win10 build 19041+）：`deviceCapture, deviceLoopback, followDefaultOutput, followDefaultInput, processLoopback, processLoopbackExclude, audioProcessList, deviceEvents, mediaSessions, mediaArtwork, spectrum, pcmStream`。
+**capabilities**：`deviceCapture, deviceLoopback, followDefaultOutput, followDefaultInput, processLoopback, processLoopbackExclude, audioProcessList, deviceEvents, mediaSessions, mediaArtwork, spectrum, pcmStream`。各平台取值见 [README 平台能力表](./README.zh-CN.md#平台能力)；Windows 进程捕捉需 Win10 build 19041+，macOS 需 14.4+ 且媒体功能依赖随附资产。
 **limits**：`maxCaptures: 8, maxFps: 60, maxBands: 256, fftSizes: [512..8192], pcmFormats: ["s16le","f32le"]`。
 
 ## 4. 事件
@@ -72,7 +72,7 @@
 
 - `MediaSession` 增加 `artworkFile`（绝对路径）与 `artworkHash` 两个字段；未开启时恒为 `null`。
 - 封面就绪/变化时推 `media.sessionUpdated`，`changed=["artwork"]`——**哈希变了才推**，同一张专辑封面跨曲目不会重复通知、也只落盘一次（内容寻址天然去重）。
-- 渲染进程可直接以 `file://` 引用 `artworkFile`，无需经主进程转发图片数据；`media.getArtwork`（base64 或 `writeTo` 按需落盘）仍可用。
+- 宿主可直接以 `file://`（或等价机制）引用 `artworkFile`，无需经宿主转发图片数据；`media.getArtwork`（base64 或 `writeTo` 按需落盘）仍可用。
 - 两种落盘方式的分工：`--artwork-dir` 是**推**（自动盯所有会话、事件通知）；`writeTo` 是**拉**（宿主指定会话按需写盘、响应即结果）。指向同一目录时缓存共享。
 - 抓取相对元数据事件是**异步**的：先收到 `mediaProperties` 更新（此时 `artworkFile` 可能还是旧值或 null），随后收到 `artwork` 更新。换曲期间过期的抓取结果会被自动丢弃。
 - 清理策略：宿主指定的目录 sidecar 绝不清理（宿主全权管理）；裸 `--artwork-dir` 的托管临时目录会在启动时删除 30 天未触碰的文件（内容哈希命名保证删错无害——还需要的图会自动重新缓存）。跨重启持久引用 `artworkFile` 的宿主应使用自指定目录。
@@ -80,14 +80,14 @@
 ## 5. 捕捉源（CaptureSource）
 
 ```ts
-{ type: "device", deviceId }          // render 设备 → WASAPI loopback；capture 设备 → 普通采集
+{ type: "device", deviceId }          // render 设备 → loopback；capture 设备 → 普通采集
 { type: "defaultOutput" }             // 跟随默认输出（multimedia role），默认设备变更自动无缝切换
 { type: "defaultInput" }              // 跟随默认输入
-{ type: "process", pid }              // 捕捉该进程及其子进程树的声音（Win10 2004+）
+{ type: "process", pid }              // 捕捉该进程及其子进程树的声音
 { type: "systemExcludingProcess", pid } // 捕捉除该进程树之外的全系统声音（如：排除宿主自身）
 ```
 
-> Windows 的进程 loopback 只有"包含进程树 / 排除进程树"两种模式，不存在"仅该进程不含子进程"。浏览器音频在 utility 子进程渲染——用根 pid 也能捕到（含树），或直接用 `processes.listAudio` 给出的实际发声 pid。
+> 进程 loopback 的"含/排除进程树"模式依赖平台支持（见 README 平台能力表）。浏览器音频常在 utility 子进程渲染——用根 pid 也能捕到（含树），或直接用 `processes.listAudio` 给出的实际发声 pid。
 
 **多路捕捉**：`capture.start` 可并发调用多次（上限 `limits.maxCaptures`，默认 8），每路独立线程、独立配置，`capture.spectrum`/`capture.pcm` 事件按 `captureId` 分流。同时捕多个进程/多个设备无需多个 sidecar 进程。
 
@@ -97,10 +97,10 @@
 
 - `bands[channel][band]`：0..1，**低频 → 高频**，3 位小数，声道 0 = 左。默认 2×64 band ≈ Wallpaper Engine `wallpaperRegisterAudioListener` 的 128 值布局（`[...bands[0], ...bands[1]]` 摊平即可；WE 的右声道倒序镜像由宿主自行排列）。
 - 处理链：fftSize 滑动窗（默认 2048）→ Hann → 实数 FFT → 对数分 band（默认 25Hz–16kHz，`maxFreq` 钳到 0.95×Nyquist）→ autoGain（5s 峰值跟踪归一到 0.9，**-80dBFS 噪声门**保证静音时归零）→ 标度（默认 dB，地板 -60）→ 每 band 攻击/衰减平滑（30fps 基准 attack 0.8 / decay 0.2，按实际 fps 自动换算）。
-- 静音期（WASAPI 不投包）按 tick 补零 → 频谱经衰减平滑自然回落（约 0.3–0.5s 降到 0），不会冻结在最后一帧。
+- 静音期（设备不投包）按 tick 补零 → 频谱经衰减平滑自然回落（约 0.3–0.5s 降到 0），不会冻结在最后一帧。
 - 带宽参考：30fps 立体声 64 band ≈ 27 KB/s。
 
-配置建议：跟随 WE 观感用默认值即可；要"原始幅度"用 `{scale:"linear", autoGain:false, gain:N}`。
+配置建议：要 Wallpaper Engine 观感用默认值即可；要"原始幅度"用 `{scale:"linear", autoGain:false, gain:N}`。
 
 ## 7. PCM（capture.pcm）
 
@@ -114,7 +114,7 @@
 `parseError, invalidRequest, methodNotFound, invalidParams, unsupported, deviceNotFound, processNotFound, activationFailed, captureNotFound, captureLimitReached, sessionNotFound, artworkUnavailable, artworkTooLarge, timeout, osError, internal`。
 `retryable: true` 表示宿主可稍后重试（激活失败/超时等瞬态；sidecar 内部已对激活失败做 3 次×150ms 重试）。
 
-## 9. 宿主集成示例（Electron 主进程）
+## 9. 宿主集成示例（Node/Electron 主进程）
 
 ```ts
 import { spawn } from "node:child_process";
@@ -128,17 +128,9 @@ createInterface({ input: sidecar.stdout }).on("line", (l) => {
   else settlePending(msg.id, msg);            // 响应按 id 结算
 });
 sidecar.stderr.pipe(logStream);               // 日志
-// 退出时无须显式清理：主进程退出 → stdin EOF → sidecar 自动退出
+// 退出时无须显式清理：宿主退出 → stdin EOF → sidecar 自动退出
 ```
 
-## 10. 平台矩阵
+## 10. 平台差异原则
 
-| 能力 | Windows | Linux（规划） | macOS（规划） |
-|---|---|---|---|
-| 设备 loopback/采集 | ✅ WASAPI | PulseAudio/PipeWire monitor | Core Audio |
-| 进程捕捉（含/排除） | ✅ Win10 2004+ | `set_monitor_stream`（无排除模式） | 14.4+ process tap |
-| 设备枚举+热插拔 | ✅ | subscribe 掩码 | 属性监听 |
-| 媒体会话（只读+事件） | ✅ SMTC | MPRIS (zbus) | MediaRemote-adapter（best-effort） |
-| 封面 | ✅ base64 | `file://` 内联 / http 回 `artworkUrl` | 视情况 |
-
-未实现平台一律 `capabilities=false` + `unsupported`，协议不变。
+各平台的能力矩阵见 [README 平台能力表](./README.zh-CN.md#平台能力)（英文版见 [README](./README.md#platform-capabilities)）。协议层各平台完全一致：未实现的能力在 `hello.capabilities` 中如实上报 `false`，调用对应方法返回 `unsupported`，绝不崩溃、不改变其余行为。

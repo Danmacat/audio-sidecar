@@ -8,7 +8,7 @@
 //! now-playing state as NDJSON. The helper ships as packaging assets next
 //! to the sidecar binary; when they are missing or Apple breaks the trick,
 //! the worker serves errors and media capabilities stay off — capture is
-//! never affected (PORTING.md §4 best-effort discipline).
+//! never affected (best-effort discipline).
 
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};

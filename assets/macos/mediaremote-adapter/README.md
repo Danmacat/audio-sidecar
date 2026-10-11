@@ -1,8 +1,8 @@
 # mediaremote-adapter packaging assets
 
 macOS media-session support reads the system `MediaRemote` private framework,
-which Apple restricts to Apple-signed platform binaries since macOS 15.4
-(PORTING.md §4b, probe #2). These assets are the community workaround
+which Apple restricts to Apple-signed platform binaries since macOS 15.4.
+These assets are the community workaround
 ([ungive/mediaremote-adapter](https://github.com/ungive/mediaremote-adapter),
 BSD-3-Clause, see `LICENSE`):
 
